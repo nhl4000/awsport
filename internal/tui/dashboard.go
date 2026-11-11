@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/nhl4000/awsport/internal/app"
+	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/open"
 	"github.com/nhl4000/awsport/internal/tunnel"
@@ -272,10 +273,14 @@ func (m *model) groupsKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 
 func (m *model) onGroupStarted(msg groupStartedMsg) tea.Cmd {
 	text := fmt.Sprintf("group %s: started %d tunnel(s)", msg.name, len(msg.specs))
-	if len(msg.errs) > 0 {
-		m.flash, m.flashErr = fmt.Sprintf("%s, %d failed: %s", text, len(msg.errs), errorsSummary(msg.errs)), true
-	} else {
+	joined := errors.Join(msg.errs...)
+	switch {
+	case len(msg.errs) == 0:
 		m.setFlash(text)
+	case awsx.WithoutPermissionErrors(joined) == nil:
+		m.setWarn(fmt.Sprintf("%s, %d not allowed:\n%s", text, len(msg.errs), permissionNotice(awsx.PermissionErrors(joined))))
+	default:
+		m.flash, m.flashLvl = fmt.Sprintf("%s, %d failed: %s", text, len(msg.errs), errorsSummary(msg.errs)), flashError
 	}
 	m.goTo(scrDashboard)
 	return m.rebuildDashboard()

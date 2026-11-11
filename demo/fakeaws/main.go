@@ -73,9 +73,19 @@ const akidPrefix = "ASIADEMO"
 
 var credRe = regexp.MustCompile(`Credential=([A-Z0-9]+)/\d+/([a-z0-9-]+)/`)
 
+// denied holds IAM actions (e.g. "rds:DescribeDBInstances") answered with an
+// access-denied error, to preview awsport's permission messages.
+var denied = map[string]bool{}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:4599", "listen address")
+	deny := flag.String("deny", "", "comma-separated IAM actions to deny, e.g. rds:DescribeDBInstances,ssm:DescribeInstanceInformation")
 	flag.Parse()
+	for _, a := range strings.Split(*deny, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			denied[a] = true
+		}
+	}
 	log.Printf("fakeaws listening on http://%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, http.HandlerFunc(handle)))
 }
@@ -95,6 +105,9 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	acct, reg := caller(r)
 	if target := r.Header.Get("X-Amz-Target"); target != "" {
 		if target == "AmazonSSM.DescribeInstanceInformation" {
+			if denyIfConfigured(w, acct, "ssm", "DescribeInstanceInformation") {
+				return
+			}
 			ssmInfo(w, acct, reg)
 			return
 		}
@@ -105,7 +118,12 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	switch action := r.PostForm.Get("Action"); action {
+	action := r.PostForm.Get("Action")
+	service := map[string]string{"DescribeInstances": "ec2", "DescribeDBInstances": "rds", "DescribeDBClusters": "rds"}[action]
+	if service != "" && denyIfConfigured(w, acct, service, action) {
+		return
+	}
+	switch action {
 	case "GetCallerIdentity":
 		writeXML(w, stsIdentity(acct))
 	case "DescribeInstances":
@@ -117,6 +135,35 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unsupported action "+action, http.StatusBadRequest)
 	}
+}
+
+// denyIfConfigured writes the service's real access-denied error shape if
+// service:action is in the -deny list.
+func denyIfConfigured(w http.ResponseWriter, a *account, service, action string) bool {
+	iam := service + ":" + action
+	if !denied[iam] {
+		return false
+	}
+	id, role := "000000000000", "developer"
+	if a != nil {
+		id, role = a.ID, a.Role
+	}
+	msg := fmt.Sprintf("User: arn:aws:sts::%s:assumed-role/AWSReservedSSO_%s_0123abcd/demo is not authorized to perform: %s because no identity-based policy allows the %s action", id, strings.ToUpper(role[:1])+role[1:], iam, iam)
+	switch service {
+	case "ssm":
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"__type": "AccessDeniedException", "message": msg})
+	case "ec2":
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>You are not authorized to perform this operation. %s</Message></Error></Errors><RequestID>demo</RequestID></Response>`, msg)
+	default:
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ErrorResponse xmlns="http://rds.amazonaws.com/doc/2014-10-31/"><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>%s</Message></Error><RequestId>demo</RequestId></ErrorResponse>`, msg)
+	}
+	return true
 }
 
 func caller(r *http.Request) (*account, string) {

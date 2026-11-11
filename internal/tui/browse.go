@@ -55,9 +55,14 @@ func (m *model) profileDesc(p core.Profile) string {
 		case awsx.IsAuthError(c.err):
 			parts = append(parts, "✗ login expired (L to log in)")
 		case errors.Is(c.err, context.Canceled):
+		case len(awsx.PermissionErrors(c.err)) > 0:
+			parts = append(parts, "⚠ "+missingActions(awsx.PermissionErrors(c.err)))
 		default:
 			parts = append(parts, "? "+oneLine(c.err.Error()))
 		}
+	}
+	if perms := m.resPerms[p.Name]; len(perms) > 0 {
+		parts = append(parts, "⚠ some resources hidden: "+missingActions(perms))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -126,16 +131,21 @@ func (m *model) discover(p core.Profile) tea.Cmd {
 
 func (m *model) onResources(msg resourcesMsg) tea.Cmd {
 	m.loading[msg.profile] = false
-	m.resErr[msg.profile] = msg.err
-	if msg.err != nil {
-		m.noteAuth(msg.profile, msg.err)
-		if awsx.IsAuthError(msg.err) {
-			m.creds[msg.profile] = credState{done: true, err: msg.err}
+	// Denied calls are listed in a warning panel; the rest of the result
+	// still shows. Only other failures count as errors.
+	rest := awsx.WithoutPermissionErrors(msg.err)
+	perms := awsx.PermissionErrors(msg.err)
+	m.resErr[msg.profile] = rest
+	m.resPerms[msg.profile] = perms
+	if rest != nil {
+		m.noteAuth(msg.profile, rest)
+		if awsx.IsAuthError(rest) {
+			m.creds[msg.profile] = credState{done: true, err: rest}
 		}
 	} else {
 		delete(m.authProfiles, msg.profile)
 	}
-	if msg.err == nil || len(msg.rs) > 0 {
+	if rest == nil || len(msg.rs) > 0 {
 		m.resources[msg.profile] = msg.rs
 		for _, r := range msg.rs {
 			m.known[r.Ref()] = r
@@ -146,8 +156,13 @@ func (m *model) onResources(msg resourcesMsg) tea.Cmd {
 			}
 		}
 	}
-	if msg.err == nil && m.cur.Name == msg.profile {
-		m.setFlash(fmt.Sprintf("%s: %d resource(s)", msg.profile, len(msg.rs)))
+	if rest == nil && m.cur.Name == msg.profile {
+		text := fmt.Sprintf("%s: %d resource(s)", msg.profile, len(msg.rs))
+		if len(perms) > 0 {
+			m.setWarn(text + "; some resources can't be listed with this role (see above)")
+		} else {
+			m.setFlash(text)
+		}
 	}
 	return tea.Batch(m.rebuildResources(), m.rebuildPorts(), m.rebuildProfiles())
 }

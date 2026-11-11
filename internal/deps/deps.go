@@ -4,6 +4,7 @@ package deps
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -62,7 +63,8 @@ var (
 	pluginVersionRe = regexp.MustCompile(`\d+(?:\.\d+)+`)
 )
 
-// CheckAll detects the AWS CLI (version 2 required) and session-manager-plugin.
+// CheckAll detects the AWS CLI (version 2.9 or newer required) and
+// session-manager-plugin.
 func CheckAll(ctx context.Context) []Check {
 	wsl := IsWSL()
 	return []Check{
@@ -98,9 +100,14 @@ func checkBinary(ctx context.Context, name string, parse func(string) (string, e
 	return c
 }
 
+// minAWSVersion is the oldest AWS CLI v2 that supports `[sso-session]`
+// sections and `aws sso login --sso-session`.
+const minAWSVersion = "2.9.0"
+
 // parseAWSVersion extracts the version from `aws --version` output
 // ("aws-cli/2.15.30 Python/3.11.8 Linux/6.5.0 exe/x86_64.ubuntu.22"). It
-// returns the version alongside an error when the major version is not 2.
+// returns the version alongside an error when the major version is not 2 or
+// the CLI is older than minAWSVersion.
 func parseAWSVersion(out string) (string, error) {
 	m := awsVersionRe.FindStringSubmatch(out)
 	if m == nil {
@@ -110,7 +117,29 @@ func parseAWSVersion(out string) (string, error) {
 	if major, _ := strconv.Atoi(m[1]); major != 2 {
 		return v, fmt.Errorf("AWS CLI %s found; version 2 is required", v)
 	}
+	if compareVersions(v, minAWSVersion) < 0 {
+		return v, fmt.Errorf("AWS CLI %s is too old for SSO sessions; awsport needs 2.9 or newer", v)
+	}
 	return v, nil
+}
+
+// compareVersions compares dot-separated numeric versions component by
+// component (missing components count as 0) and returns -1, 0 or +1.
+func compareVersions(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range max(len(as), len(bs)) {
+		var x, y int
+		if i < len(as) {
+			x, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			y, _ = strconv.Atoi(bs[i])
+		}
+		if c := cmp.Compare(x, y); c != 0 {
+			return c
+		}
+	}
+	return 0
 }
 
 // parsePluginVersion extracts the version from `session-manager-plugin

@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nhl4000/awsport/internal/app"
+	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/config"
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/deps"
@@ -370,4 +372,74 @@ func validateSSO(s config.SSO) error {
 		return fmt.Errorf("invalid session name %q: no spaces or brackets", s.Session)
 	}
 	return nil
+}
+
+// flashLevel is the severity of the status-line message.
+type flashLevel int
+
+const (
+	flashOK flashLevel = iota
+	flashWarn
+	flashError
+)
+
+// maxPreambleHeight bounds the context block above a screen's list.
+const maxPreambleHeight = 8
+
+// failureText is "failed: <reason>" for a failed session with a reason, else "".
+func failureText(s tunnel.Session) string {
+	if s.Status != tunnel.Failed || s.Err == "" {
+		return ""
+	}
+	return "failed: " + s.Err
+}
+
+// permissionLines turns denied AWS calls into calm warnings, one per action
+// (regions merged in order), e.g. "⚠ Can't list RDS databases in
+// ca-central-1, us-east-1 — missing rds:DescribeDBInstances", followed by
+// one admin hint per permission set.
+func permissionLines(perms []*awsx.PermissionError) (warnings, hints []string) {
+	type group struct {
+		what, action string
+		regions      []string
+	}
+	var groups []*group
+	byKey := map[[2]string]*group{}
+	for _, p := range perms {
+		key := [2]string{p.Action, p.What}
+		g := byKey[key]
+		if g == nil {
+			g = &group{what: p.What, action: p.Action}
+			byKey[key] = g
+			groups = append(groups, g)
+		}
+		if p.Region != "" && !slices.Contains(g.regions, p.Region) {
+			g.regions = append(g.regions, p.Region)
+		}
+	}
+	for _, g := range groups {
+		w := "⚠ Can't " + g.what
+		if len(g.regions) > 0 {
+			w += " in " + strings.Join(g.regions, ", ")
+		}
+		warnings = append(warnings, w+" — missing "+g.action)
+	}
+	return warnings, awsx.Hints(perms)
+}
+
+// permissionNotice is permissionLines as one multi-line status message.
+func permissionNotice(perms []*awsx.PermissionError) string {
+	warnings, hints := permissionLines(perms)
+	return strings.Join(append(warnings, hints...), "\n")
+}
+
+// missingActions is "missing a, b" for the distinct denied actions.
+func missingActions(perms []*awsx.PermissionError) string {
+	var actions []string
+	for _, p := range perms {
+		if !slices.Contains(actions, p.Action) {
+			actions = append(actions, p.Action)
+		}
+	}
+	return "missing " + strings.Join(actions, ", ")
 }

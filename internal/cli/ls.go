@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nhl4000/awsport/internal/app"
+	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/core"
 )
 
@@ -65,7 +66,7 @@ func newLsCmd() *cobra.Command {
 				return fmt.Errorf("no AWS profiles found; run `awsport init` then `awsport login`")
 			}
 
-			resources, errs := discoverAll(cmd.Context(), a, profiles)
+			resources, perms, errs := discoverAll(cmd.Context(), a, profiles)
 			for _, err := range errs {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", err)
 			}
@@ -87,6 +88,7 @@ func newLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			writePermissionWarnings(cmd.ErrOrStderr(), perms)
 			if len(errs) > 0 {
 				return fmt.Errorf("discovery failed for %d of %d profiles", len(errs), len(profiles))
 			}
@@ -98,11 +100,15 @@ func newLsCmd() *cobra.Command {
 	return cmd
 }
 
-func discoverAll(ctx context.Context, a *app.App, profiles []core.Profile) ([]core.Resource, []error) {
+// discoverAll discovers every profile concurrently. Calls denied by IAM are
+// returned as perms; other failures (with a login hint for expired
+// credentials) as errs.
+func discoverAll(ctx context.Context, a *app.App, profiles []core.Profile) ([]core.Resource, []*awsx.PermissionError, []error) {
 	var (
 		mu        sync.Mutex
 		wg        sync.WaitGroup
 		resources []core.Resource
+		perms     []*awsx.PermissionError
 		errs      []error
 	)
 	sem := make(chan struct{}, lsConcurrency)
@@ -113,17 +119,20 @@ func discoverAll(ctx context.Context, a *app.App, profiles []core.Profile) ([]co
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			res, err := a.Discover(ctx, p)
+			denied, rest := splitPermissions(err)
 			mu.Lock()
 			defer mu.Unlock()
 			resources = append(resources, res...)
-			if err != nil {
-				errs = append(errs, authHint(err, p.Name))
+			perms = append(perms, denied...)
+			if rest != nil {
+				errs = append(errs, authHint(rest, p.Name))
 			}
 		}(p)
 	}
 	wg.Wait()
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
-	return resources, errs
+	sort.SliceStable(perms, func(i, j int) bool { return perms[i].Error() < perms[j].Error() })
+	return resources, perms, errs
 }
 
 func sortResources(rs []core.Resource) {

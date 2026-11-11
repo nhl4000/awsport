@@ -137,14 +137,14 @@ func runUp(ctx context.Context, a *app.App, targets []upTarget, detach bool, out
 			got, errs := a.StartGroup(ctx, t.Group)
 			specs = append(specs, got...)
 			for _, err := range errs {
-				fmt.Fprintln(errOut, "error:", err)
+				reportStartError(errOut, "", "", err)
 				failed++
 			}
 			continue
 		}
 		spec, err := startTarget(ctx, a, t)
 		if err != nil {
-			fmt.Fprintf(errOut, "error: %s/%s: %v\n", t.Profile, t.Name, authHint(err, t.Profile))
+			reportStartError(errOut, t.Profile+"/"+t.Name+": ", t.Profile, err)
 			failed++
 			continue
 		}
@@ -277,4 +277,18 @@ func printEvent(w io.Writer, s tunnel.Session) {
 		line += fmt.Sprintf(" (run `awsport login %s`)", s.Spec.Profile)
 	}
 	fmt.Fprintln(w, line)
+}
+
+// reportStartError prints a failed tunnel start: missing IAM permissions as
+// calm warnings with the admin hint, anything else as an error line (with a
+// login hint for profile when credentials expired).
+func reportStartError(w io.Writer, prefix, profile string, err error) {
+	perms, rest := splitPermissions(err)
+	if rest != nil {
+		if profile != "" {
+			rest = authHint(rest, profile)
+		}
+		fmt.Fprintf(w, "error: %s%v\n", prefix, rest)
+	}
+	writePermissionWarnings(w, perms)
 }

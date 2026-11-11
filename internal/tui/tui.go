@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/deps"
+	"github.com/nhl4000/awsport/internal/login"
 	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
@@ -186,20 +186,21 @@ type model struct {
 	help  help.Model
 
 	flash        string
-	flashErr     bool
+	flashLvl     flashLevel
 	authProfiles map[string]bool // profiles whose AWS calls failed with auth errors
 	depsWarning  string
 	started      time.Time // UI start; older Up events are snapshots, not news
 
 	modal      *modal
 	input      *inputPrompt
-	loginQueue []*exec.Cmd
+	loginQueue []*login.Cmd
 
 	profiles  []core.Profile
 	creds     map[string]credState
 	credSem   chan struct{}
 	resources map[string][]core.Resource
-	resErr    map[string]error
+	resErr    map[string]error                   // discovery failures other than missing permissions
+	resPerms  map[string][]*awsx.PermissionError // discovery calls denied by IAM, per profile
 	loading   map[string]bool
 	known     map[string]core.Resource // by Resource.Ref()
 
@@ -230,6 +231,7 @@ func newModel(a *app.App) *model {
 		credSem:      make(chan struct{}, maxCredChecks),
 		resources:    map[string][]core.Resource{},
 		resErr:       map[string]error{},
+		resPerms:     map[string][]*awsx.PermissionError{},
 		loading:      map[string]bool{},
 		known:        map[string]core.Resource{},
 		selected:     map[string]bool{},
@@ -371,13 +373,6 @@ func (m *model) tick() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-func (m *model) awsPath() string {
-	if m.a.AWSPath != "" {
-		return m.a.AWSPath
-	}
-	return "aws"
-}
-
 func (m *model) checkDeps(background bool) tea.Cmd {
 	return m.run("checking prerequisites", depsTimeout, func(ctx context.Context) tea.Msg {
 		return depsMsg{checks: deps.CheckAll(ctx), background: background}
@@ -419,10 +414,18 @@ func (m *model) checkAllCreds() tea.Cmd {
 
 // ---- status line ----
 
-func (m *model) setFlash(s string) { m.flash, m.flashErr = s, false }
+func (m *model) setFlash(s string) { m.flash, m.flashLvl = s, flashOK }
 
+func (m *model) setWarn(s string) { m.flash, m.flashLvl = s, flashWarn }
+
+// setErr shows err in the status line. Errors that consist only of missing
+// IAM permissions are shown as a calm warning with the admin hint.
 func (m *model) setErr(err error) {
-	m.flash, m.flashErr = strings.Join(strings.Fields(err.Error()), " "), true
+	if perms := awsx.PermissionErrors(err); len(perms) > 0 && awsx.WithoutPermissionErrors(err) == nil {
+		m.setWarn(permissionNotice(perms))
+		return
+	}
+	m.flash, m.flashLvl = oneLine(err.Error()), flashError
 }
 
 // noteAuth records profiles whose calls failed due to expired credentials.
@@ -685,9 +688,9 @@ func (m *model) onEvent(ev tunnel.Event) tea.Cmd {
 	label := ev.Session.Spec.Label
 	switch ev.Session.Status {
 	case tunnel.AuthExpired:
-		m.flash, m.flashErr = fmt.Sprintf("%s: credentials expired, press L to log in again", label), true
+		m.flash, m.flashLvl = fmt.Sprintf("%s: credentials expired, press L to log in again", label), flashError
 	case tunnel.Failed:
-		m.flash, m.flashErr = fmt.Sprintf("%s failed: %s", label, ev.Session.Err), true
+		m.flash, m.flashLvl = fmt.Sprintf("%s failed: %s", label, ev.Session.Err), flashError
 	case tunnel.Up:
 		// Snapshots of tunnels that came up before this UI started are not news.
 		if !ev.Session.Since.Before(m.started) {
@@ -721,7 +724,10 @@ func (m *model) onResumed(msg resumedMsg) tea.Cmd {
 	if len(parts) == 0 {
 		return nil
 	}
-	m.flash, m.flashErr = strings.Join(parts, "; "), msg.warning != ""
+	m.flash, m.flashLvl = strings.Join(parts, "; "), flashOK
+	if msg.warning != "" {
+		m.flashLvl = flashError
+	}
 	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
 }
 
@@ -750,9 +756,9 @@ func (m *model) relogin() tea.Cmd {
 
 func (m *model) loginProfiles(names []string) tea.Cmd {
 	sessions, profs, unknown := loginPlan(names, m.profiles)
-	var cmds []*exec.Cmd
+	var cmds []*login.Cmd
 	for _, s := range sessions {
-		cmds = append(cmds, awsx.SSOLoginCmd(m.awsPath(), s))
+		cmds = append(cmds, login.SSOSession(m.a.AWSPath, s))
 	}
 	for _, n := range profs {
 		if p, ok := m.profileByName(n); ok {
@@ -769,8 +775,8 @@ func (m *model) loginProfiles(names []string) tea.Cmd {
 	return execLogin(cmds[0])
 }
 
-func execLogin(c *exec.Cmd) tea.Cmd {
-	return tea.ExecProcess(c, func(err error) tea.Msg { return loginDoneMsg{err: err} })
+func execLogin(c *login.Cmd) tea.Cmd {
+	return tea.Exec(c, func(err error) tea.Msg { return loginDoneMsg{err: err} })
 }
 
 func (m *model) onLoginDone(msg loginDoneMsg) tea.Cmd {
@@ -868,17 +874,34 @@ func (m *model) headerView() string {
 	return titleBarStyle.Render("awsport") + subtleStyle.Render(" · "+titles[m.screen()]+" · unofficial")
 }
 
-// preamble is an optional context line above the current screen's list.
+// preamble is optional context above the current screen's list: discovery
+// problems, the selected resource, or the full error of a failed tunnel.
 func (m *model) preamble() string {
-	w := lipgloss.NewStyle().Width(m.width - 4).MaxHeight(4)
+	width := m.width - 4
 	var s string
 	switch m.screen() {
 	case scrResources:
-		if err := m.resErr[m.cur.Name]; err != nil {
-			s = errStyle.Render(oneLine(err.Error()))
+		var parts []string
+		if panel := permissionPanel(m.resPerms[m.cur.Name], width); panel != "" {
+			parts = append(parts, panel)
 		}
+		if err := m.resErr[m.cur.Name]; err != nil {
+			parts = append(parts, errStyle.Render(oneLine(err.Error())))
+		}
+		s = strings.Join(parts, "\n")
 	case scrPorts:
 		s = subtleStyle.Render(resourceSummary(m.curRes))
+		if remote, sess, exists, ok := m.selectedPort(); ok && exists {
+			if f := failureText(sess); f != "" {
+				s += "\n" + errStyle.Render(fmt.Sprintf("✗ port %d %s", remote, f))
+			}
+		}
+	case scrDashboard:
+		if sess, ok := m.selectedSession(); ok {
+			if f := failureText(sess); f != "" {
+				s = errStyle.Render("✗ " + sess.Spec.Label + " " + f)
+			}
+		}
 	case scrBastion:
 		if m.bastion != nil {
 			s = fmt.Sprintf("%s:%d needs a bastion in %s/%s. No instance is tagged %s=true or named %q.",
@@ -893,7 +916,24 @@ func (m *model) preamble() string {
 	if s == "" {
 		return ""
 	}
-	return bodyStyle.Render(w.Render(s))
+	return bodyStyle.Render(lipgloss.NewStyle().Width(width).MaxHeight(maxPreambleHeight).Render(s))
+}
+
+// permissionPanel renders denied discovery calls as a small warning box.
+func permissionPanel(perms []*awsx.PermissionError, width int) string {
+	warnings, hints := permissionLines(perms)
+	if len(warnings) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(warnings)+len(hints))
+	for _, w := range warnings {
+		lines = append(lines, warnStyle.Render(w))
+	}
+	for _, h := range hints {
+		lines = append(lines, subtleStyle.Render(h))
+	}
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorWarn).Padding(0, 1).Width(max(width-2, 10))
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) footerView() string {
@@ -901,7 +941,7 @@ func (m *model) footerView() string {
 	if width < 20 {
 		width = 20
 	}
-	wrap := lipgloss.NewStyle().Width(width).MaxHeight(3)
+	wrap := lipgloss.NewStyle().Width(width).MaxHeight(4)
 	var lines []string
 	switch {
 	case m.input != nil:
@@ -914,7 +954,10 @@ func (m *model) footerView() string {
 		lines = append(lines, m.spin.View()+" "+m.opLabels())
 	case m.flash != "":
 		st := okStyle
-		if m.flashErr {
+		switch m.flashLvl {
+		case flashWarn:
+			st = warnStyle
+		case flashError:
 			st = errStyle
 		}
 		lines = append(lines, wrap.Render(st.Render(m.flash)))

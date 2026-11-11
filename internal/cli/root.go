@@ -3,11 +3,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"runtime"
 
 	"github.com/spf13/cobra"
@@ -79,27 +76,6 @@ func newVersionCmd(version, commit string) *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), versionString(version, commit))
 		},
 	}
-}
-
-// runAttached runs an interactive command wired to the terminal.
-func runAttached(cmd *exec.Cmd, stdout, stderr io.Writer) error {
-	if cmd.Stdin == nil {
-		cmd.Stdin = os.Stdin
-	}
-	if cmd.Stdout == nil {
-		cmd.Stdout = stdout
-	}
-	if cmd.Stderr == nil {
-		cmd.Stderr = stderr
-	}
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("%s exited with status %d", cmd.Path, exitErr.ExitCode())
-		}
-		return fmt.Errorf("run %s: %w", cmd.Path, err)
-	}
-	return nil
 }
 
 // authHint appends a login hint to credential errors.

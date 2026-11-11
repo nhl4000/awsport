@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,23 +19,6 @@ import (
 
 	"github.com/nhl4000/awsport/internal/config"
 )
-
-// SSOLoginCmd returns `aws sso login --sso-session <session>`.
-func SSOLoginCmd(awsPath, session string) *exec.Cmd {
-	return exec.Command(awsBinary(awsPath), "sso", "login", "--sso-session", session)
-}
-
-// ProfileLoginCmd returns `aws sso login --profile <profile>`.
-func ProfileLoginCmd(awsPath, profile string) *exec.Cmd {
-	return exec.Command(awsBinary(awsPath), "sso", "login", "--profile", profile)
-}
-
-func awsBinary(p string) string {
-	if p == "" {
-		return "aws"
-	}
-	return p
-}
 
 // tokenSkew is the minimum remaining validity for a cached token to be used.
 const tokenSkew = time.Minute

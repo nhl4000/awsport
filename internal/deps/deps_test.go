@@ -15,7 +15,10 @@ func TestParseAWSVersion(t *testing.T) {
 		wantErr bool
 	}{
 		{"aws-cli/2.15.30 Python/3.11.8 Linux/6.5.0-1016-aws exe/x86_64.ubuntu.22 prompt/off\n", "2.15.30", false},
-		{"aws-cli/2.0.0 Python/3.7.3 Darwin/19.6.0 botocore/2.0.0dev4", "2.0.0", false},
+		{"aws-cli/2.0.0 Python/3.7.3 Darwin/19.6.0 botocore/2.0.0dev4", "2.0.0", true},
+		{"aws-cli/2.8.12 Python/3.9.11 Linux/5.15.0 exe/x86_64.ubuntu.22", "2.8.12", true},
+		{"aws-cli/2.9.0 Python/3.9.11 Linux/5.15.0 exe/x86_64.ubuntu.22", "2.9.0", false},
+		{"aws-cli/2.10.1 Python/3.9.11 Darwin/22.1.0 exe/x86_64", "2.10.1", false},
 		{"aws-cli/1.29.62 Python/3.10.12 Linux/5.15.0 botocore/1.31.62", "1.29.62", true},
 		{"command not found", "", true},
 		{"", "", true},
@@ -24,6 +27,34 @@ func TestParseAWSVersion(t *testing.T) {
 		got, err := parseAWSVersion(tt.out)
 		if got != tt.want || (err != nil) != tt.wantErr {
 			t.Errorf("parseAWSVersion(%q) = %q, %v; want %q, err=%v", tt.out, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
+
+func TestParseAWSVersionTooOld(t *testing.T) {
+	_, err := parseAWSVersion("aws-cli/2.7.35 Python/3.9.11 Linux/5.15.0 exe/x86_64.ubuntu.22")
+	want := "AWS CLI 2.7.35 is too old for SSO sessions; awsport needs 2.9 or newer"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v; want %q", err, want)
+	}
+}
+
+func TestCompareVersions(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"2.9.0", "2.9.0", 0},
+		{"2.9", "2.9.0", 0},
+		{"2.8.12", "2.9.0", -1},
+		{"2.10.0", "2.9.0", 1}, // numeric, not lexical
+		{"2.9.1", "2.9.0", 1},
+		{"1.99.99", "2.0.0", -1},
+		{"3.0.0", "2.99.99", 1},
+	}
+	for _, tt := range tests {
+		if got := compareVersions(tt.a, tt.b); got != tt.want {
+			t.Errorf("compareVersions(%q, %q) = %d; want %d", tt.a, tt.b, got, tt.want)
 		}
 	}
 }

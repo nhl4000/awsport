@@ -35,13 +35,20 @@ func URL(spec core.TunnelSpec) (string, bool) {
 	return scheme + "://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(spec.LocalPort)), true
 }
 
+// ErrNoDisplay means there is no graphical session to show a browser in
+// (Linux/BSD without DISPLAY or WAYLAND_DISPLAY, e.g. over SSH). Launching
+// xdg-open there may start a text browser inside the terminal.
+var ErrNoDisplay = errors.New("no graphical display (DISPLAY is not set)")
+
 // Browser opens url in the default browser without waiting for it.
 func Browser(url string) error {
-	name, args, err := browserCommand(runtime.GOOS, isWSL(), exec.LookPath, url)
+	display := os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	l, err := browserCommand(runtime.GOOS, isWSL(), display, exec.LookPath, fileExists, wslMountRoot(), url)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(l.name, l.args...)
+	cmd.Dir = l.dir
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("open %s: %w", url, err)
 	}
@@ -49,25 +56,88 @@ func Browser(url string) error {
 	return nil
 }
 
-// browserCommand picks the launcher for goos. On WSL it prefers wslview and
-// falls back to cmd.exe, where & must be escaped as ^&.
-func browserCommand(goos string, wsl bool, lookPath func(string) (string, error), url string) (string, []string, error) {
+// ErrNoWindowsInterop means awsport runs under WSL but cannot reach a Windows
+// program to open the browser (interop disabled or the C: drive not mounted).
+var ErrNoWindowsInterop = errors.New("cannot reach Windows from WSL to open a browser (install wslu for wslview, or enable WSL interop)")
+
+type launcher struct {
+	name string
+	args []string
+	dir  string // working directory; empty = inherit
+}
+
+// browserCommand picks the launcher for goos. On WSL it prefers wslview, then
+// Windows' rundll32 (which hands the URL to the default browser without
+// cmd.exe quoting rules), found on PATH or under the WSL mount root since
+// many setups don't append Windows directories to PATH. Windows programs run
+// from the C: mount to avoid cmd/UNC working-directory warnings. display
+// reports a graphical session on Linux/BSD outside WSL.
+func browserCommand(goos string, wsl, display bool, lookPath func(string) (string, error), exists func(string) bool, mountRoot, url string) (launcher, error) {
 	switch goos {
 	case "darwin":
-		return "open", []string{url}, nil
+		return launcher{name: "open", args: []string{url}}, nil
 	case "windows":
-		return "rundll32", []string{"url.dll,FileProtocolHandler", url}, nil
+		return launcher{name: "rundll32", args: []string{"url.dll,FileProtocolHandler", url}}, nil
 	}
 	if wsl {
 		if p, err := lookPath("wslview"); err == nil {
-			return p, []string{url}, nil
+			return launcher{name: p, args: []string{url}}, nil
 		}
-		return "cmd.exe", []string{"/c", "start", "", strings.ReplaceAll(url, "&", "^&")}, nil
+		cDrive := strings.TrimRight(mountRoot, "/") + "/c"
+		rundll := ""
+		if p, err := lookPath("rundll32.exe"); err == nil {
+			rundll = p
+		} else if p := cDrive + "/Windows/System32/rundll32.exe"; exists(p) {
+			rundll = p
+		}
+		if rundll == "" {
+			return launcher{}, ErrNoWindowsInterop
+		}
+		dir := ""
+		if exists(cDrive) {
+			dir = cDrive
+		}
+		return launcher{name: rundll, args: []string{"url.dll,FileProtocolHandler", url}, dir: dir}, nil
 	}
 	if goos == "linux" || strings.HasSuffix(goos, "bsd") {
-		return "xdg-open", []string{url}, nil
+		if !display {
+			return launcher{}, ErrNoDisplay
+		}
+		return launcher{name: "xdg-open", args: []string{url}}, nil
 	}
-	return "", nil, errors.New("opening a browser is not supported on " + goos)
+	return launcher{}, errors.New("opening a browser is not supported on " + goos)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// wslMountRoot returns the [automount] root from /etc/wsl.conf (default "/mnt/").
+func wslMountRoot() string {
+	b, err := os.ReadFile("/etc/wsl.conf")
+	if err != nil {
+		return "/mnt/"
+	}
+	return parseMountRoot(string(b))
+}
+
+func parseMountRoot(conf string) string {
+	section := ""
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.ToLower(strings.Trim(line, "[] "))
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if ok && section == "automount" && strings.TrimSpace(strings.ToLower(k)) == "root" {
+			if v = strings.Trim(strings.TrimSpace(v), `"'`); v != "" {
+				return v
+			}
+		}
+	}
+	return "/mnt/"
 }
 
 // isWSL reports whether the process runs under Windows Subsystem for Linux.

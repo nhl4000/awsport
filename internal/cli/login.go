@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nhl4000/awsport/internal/app"
 	"github.com/nhl4000/awsport/internal/awsx"
+	"github.com/nhl4000/awsport/internal/login"
 )
 
 func newLoginCmd() *cobra.Command {
@@ -30,17 +32,17 @@ func newLoginCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				login := a.LoginCmd(p)
-				if login == nil {
+				c := a.LoginCmd(p)
+				if c == nil {
 					return fmt.Errorf("profile %q uses %s credentials; nothing to log in", p.Name, p.Kind)
 				}
-				return runAttached(login, out, errOut)
+				return c.RunContext(cmd.Context(), os.Stdin, out, errOut)
 			}
 
 			if err := a.EnsureSSOSession(); err != nil {
 				return err
 			}
-			if err := runAttached(awsx.SSOLoginCmd(a.AWSPath, a.SSOConfig().Session), out, errOut); err != nil {
+			if err := login.SSOSession(a.AWSPath, a.SSOConfig().Session).RunContext(cmd.Context(), os.Stdin, out, errOut); err != nil {
 				return err
 			}
 			n, err := a.SyncSSOProfiles(cmd.Context())

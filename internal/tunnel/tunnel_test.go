@@ -58,6 +58,16 @@ func TestHelperProcess(t *testing.T) {
 	case "sso":
 		fmt.Fprintln(os.Stderr, "Error loading SSO Token: Token for example does not exist")
 		os.Exit(255)
+	case "denied":
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: User: arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Developer_0123456789abcdef/jane is not authorized to perform: ssm:StartSession on resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSessionToRemoteHost because no identity-based policy allows the ssm:StartSession action")
+		os.Exit(254)
+	case "deniedbare":
+		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: Forbidden")
+		os.Exit(254)
+	case "deniedkms":
+		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: User: arn:aws:sts::123456789012:assumed-role/deploy/ci is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/example")
+		os.Exit(254)
 	case "upexit":
 		fmt.Println("Waiting for connections...")
 		time.Sleep(20 * time.Millisecond)
@@ -281,6 +291,33 @@ func TestAuthExpiredDoesNotReconnect(t *testing.T) {
 			}
 			if n := m.ActiveCount(); n != 0 {
 				t.Fatalf("ActiveCount = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestAccessDeniedFailsWithoutReconnect(t *testing.T) {
+	tests := []struct{ mode, action string }{
+		{"denied", "ssm:StartSession"},
+		{"deniedbare", "ssm:StartSession"},
+		{"deniedkms", "kms:GenerateDataKey"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			m, f := newTestManager(t, Options{Reconnect: true, MaxFailures: 5}, tt.mode, "up")
+			spec := testSpec("k", "l")
+			if err := m.Start(spec); err != nil {
+				t.Fatal(err)
+			}
+			s := waitStatus(t, m, spec.Key, Failed)
+			want := "not allowed to start an SSM session on i-0123456789abcdef0 (missing " + tt.action + "). " +
+				"Ask your AWS admin to allow it — see https://github.com/nhl4000/awsport#iam-permissions"
+			if s.Err != want || s.Attempts != 1 {
+				t.Fatalf("Err = %q, Attempts = %d; want %q, 1", s.Err, s.Attempts, want)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if n := f.calls.Load(); n != 1 {
+				t.Fatalf("command ran %d times, want 1", n)
 			}
 		})
 	}

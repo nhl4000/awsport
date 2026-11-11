@@ -81,7 +81,7 @@ Update later with `awsport update`.
 
 Run `awsport`. On first start it walks you through onboarding:
 
-1. **Prerequisites** — AWS CLI v2 and `session-manager-plugin`. Missing tools
+1. **Prerequisites** — AWS CLI v2 (2.9 or newer) and `session-manager-plugin`. Missing tools
    come with the official install commands for your OS, which awsport can run
    for you.
 2. **SSO setup**, one of:
@@ -89,7 +89,9 @@ Run `awsport`. On first start it walks you through onboarding:
      contains the SSO start URL and region;
    - reuse an existing `[sso-session]` already in `~/.aws/config`;
    - enter the start URL (e.g. `https://d-0000000000.awsapps.com/start`) and region.
-3. **Login** — `aws sso login` opens your browser.
+3. **Login** — awsport runs `aws sso login`, shows the sign-in link and code,
+   and opens your browser (on WSL via `wslview` or Windows directly). If no
+   browser can be opened, click or copy the link instead.
 4. **Profile sync** — awsport lists every account and role you can access and
    writes one profile per pair, named `<account-name>-<role-name>`, into a
    clearly marked block in `~/.aws/config`:
@@ -237,21 +239,65 @@ identifier) and, if set, region — so groups survive instance replacement.
 
 ## IAM permissions
 
-The role you log in with needs:
+The role you log in with (for IAM Identity Center: the **permission set**)
+needs:
 
 | Action                            | Used for                                  |
 | --------------------------------- | ----------------------------------------- |
 | `ec2:DescribeInstances`           | listing instances and tags                |
 | `ssm:DescribeInstanceInformation` | SSM agent online status                   |
-| `ssm:StartSession`                | tunnels and shells                        |
-| `ssm:TerminateSession`            | closing sessions                          |
 | `rds:DescribeDBInstances`         | listing RDS instances                     |
 | `rds:DescribeDBClusters`          | listing Aurora clusters                   |
-| `sso:ListAccounts`                | profile sync                              |
-| `sso:ListAccountRoles`            | profile sync                              |
+| `ssm:StartSession`                | tunnels and shells                        |
+| `ssm:TerminateSession`, `ssm:ResumeSession` | closing / resuming your sessions |
 
-`ssm:StartSession` must allow the documents `AWS-StartPortForwardingSession`,
-`AWS-StartPortForwardingSessionToRemoteHost` and `AWS-StartInteractiveCommand`.
+Profile sync (listing accounts and roles) uses your SSO login itself and needs
+no extra IAM permission.
+
+When something is missing, awsport says which action and which permission set,
+e.g. *Can't list RDS databases in ca-central-1 — missing
+rds:DescribeDBInstances*. Paste this as an inline policy on the permission set
+(IAM Identity Center → Permission sets → *set* → Inline policy) to cover
+everything awsport does:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AwsportDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ssm:DescribeInstanceInformation",
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AwsportSessions",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ssm:*::document/AWS-StartPortForwardingSession",
+        "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost",
+        "arn:aws:ssm:*::document/AWS-StartInteractiveCommand"
+      ]
+    },
+    {
+      "Sid": "AwsportOwnSessions",
+      "Effect": "Allow",
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+      "Resource": "arn:aws:ssm:*:*:session/*"
+    }
+  ]
+}
+```
+
+Narrow `arn:aws:ec2:*:*:instance/*` (e.g. with an `ssm:resourceTag` condition)
+if users should only reach some instances.
 
 ## Development
 

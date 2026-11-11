@@ -8,12 +8,6 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/rds"
-	rdstypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go"
 
 	"github.com/nhl4000/awsport/internal/core"
@@ -128,51 +122,7 @@ func TestPickBastion(t *testing.T) {
 	}
 }
 
-// Fakes serve pre-built pages, keyed by NextToken = page index.
-
-type fakeEC2 struct {
-	pages []*ec2.DescribeInstancesOutput
-}
-
-func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-	i := pageIndex(in.NextToken)
-	out := *f.pages[i]
-	out.NextToken = nextToken(i, len(f.pages))
-	return &out, nil
-}
-
-type fakeSSM struct {
-	pages []*ssm.DescribeInstanceInformationOutput
-	err   error
-}
-
-func (f *fakeSSM) DescribeInstanceInformation(_ context.Context, in *ssm.DescribeInstanceInformationInput, _ ...func(*ssm.Options)) (*ssm.DescribeInstanceInformationOutput, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	i := pageIndex(in.NextToken)
-	out := *f.pages[i]
-	out.NextToken = nextToken(i, len(f.pages))
-	return &out, nil
-}
-
-type fakeRDS struct {
-	instances []rdstypes.DBInstance
-	clusters  []rdstypes.DBCluster
-	err       error
-}
-
-func (f *fakeRDS) DescribeDBInstances(context.Context, *rds.DescribeDBInstancesInput, ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &rds.DescribeDBInstancesOutput{DBInstances: f.instances}, nil
-}
-
-func (f *fakeRDS) DescribeDBClusters(context.Context, *rds.DescribeDBClustersInput, ...func(*rds.Options)) (*rds.DescribeDBClustersOutput, error) {
-	return &rds.DescribeDBClustersOutput{DBClusters: f.clusters}, nil
-}
-
+// pageIndex and nextToken page fake SDK outputs: NextToken = page index.
 func pageIndex(token *string) int {
 	if token == nil {
 		return 0
@@ -188,46 +138,75 @@ func nextToken(i, n int) *string {
 	return aws.String(strconv.Itoa(i + 1))
 }
 
-func instance(id, name string, state ec2types.InstanceStateName, tags map[string]string) ec2types.Instance {
-	inst := ec2types.Instance{InstanceId: aws.String(id), State: &ec2types.InstanceState{Name: state}}
+// Fakes return the already-paginated results of one region.
+
+type fakeEC2 struct {
+	instances []ec2Instance
+	err       error
+}
+
+func (f *fakeEC2) describeInstances(context.Context) ([]ec2Instance, error) {
+	return f.instances, f.err
+}
+
+type fakeSSM struct {
+	infos []ssmInstanceInfo
+	err   error
+}
+
+func (f *fakeSSM) describeOnlineInstances(context.Context) ([]ssmInstanceInfo, error) {
+	return f.infos, f.err
+}
+
+type fakeRDS struct {
+	instances  []dbInstance
+	clusters   []dbCluster
+	instErr    error
+	clusterErr error
+}
+
+func (f *fakeRDS) describeDBInstances(context.Context) ([]dbInstance, error) {
+	return f.instances, f.instErr
+}
+
+func (f *fakeRDS) describeDBClusters(context.Context) ([]dbCluster, error) {
+	return f.clusters, f.clusterErr
+}
+
+func instance(id, name, state string, tags map[string]string) ec2Instance {
+	inst := ec2Instance{ID: id, State: state}
 	if name != "" {
-		inst.Tags = append(inst.Tags, ec2types.Tag{Key: aws.String("Name"), Value: aws.String(name)})
+		inst.Tags = append(inst.Tags, ec2Tag{Key: "Name", Value: name})
 	}
 	for k, v := range tags {
-		inst.Tags = append(inst.Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		inst.Tags = append(inst.Tags, ec2Tag{Key: k, Value: v})
 	}
 	return inst
 }
 
 func TestDiscoverRegion(t *testing.T) {
 	clients := regionClients{
-		ec2: &fakeEC2{pages: []*ec2.DescribeInstancesOutput{
-			{Reservations: []ec2types.Reservation{{Instances: []ec2types.Instance{
-				instance("i-web", "web", ec2types.InstanceStateNameRunning, map[string]string{
-					core.TagPorts: "mailpit:8025, api:3000",
-					core.TagShell: "bash -l",
-				}),
-				instance("i-gone", "gone", ec2types.InstanceStateNameTerminated, nil),
-			}}}},
-			{Reservations: []ec2types.Reservation{{Instances: []ec2types.Instance{
-				instance("i-jump", "jump", ec2types.InstanceStateNameRunning, map[string]string{core.TagBastion: "TRUE"}),
-				instance("i-stopped", "", ec2types.InstanceStateNameStopped, nil),
-			}}}},
+		ec2: &fakeEC2{instances: []ec2Instance{
+			instance("i-web", "web", "running", map[string]string{
+				core.TagPorts: "mailpit:8025, api:3000",
+				core.TagShell: "bash -l",
+			}),
+			instance("i-gone", "gone", "terminated", nil),
+			instance("i-jump", "jump", "running", map[string]string{core.TagBastion: "TRUE"}),
+			instance("i-stopped", "", "stopped", nil),
 		}},
-		ssm: &fakeSSM{pages: []*ssm.DescribeInstanceInformationOutput{
-			{InstanceInformationList: []ssmtypes.InstanceInformation{{InstanceId: aws.String("i-web"), PingStatus: ssmtypes.PingStatusOnline}}},
-			{InstanceInformationList: []ssmtypes.InstanceInformation{{InstanceId: aws.String("i-stopped"), PingStatus: ssmtypes.PingStatusConnectionLost}}},
+		ssm: &fakeSSM{infos: []ssmInstanceInfo{
+			{InstanceID: "i-web", PingStatus: "Online"},
+			{InstanceID: "i-stopped", PingStatus: "ConnectionLost"},
 		}},
 		rds: &fakeRDS{
-			instances: []rdstypes.DBInstance{
-				{DBInstanceIdentifier: aws.String("standalone"), DBInstanceStatus: aws.String("available"), Engine: aws.String("postgres"),
-					Endpoint: &rdstypes.Endpoint{Address: aws.String("standalone.example.internal"), Port: aws.Int32(5432)}},
-				{DBInstanceIdentifier: aws.String("aurora-1"), DBClusterIdentifier: aws.String("aurora"), DBInstanceStatus: aws.String("available")},
-				{DBInstanceIdentifier: aws.String("paused"), DBInstanceStatus: aws.String("stopped"), Engine: aws.String("mysql")},
+			instances: []dbInstance{
+				{ID: "standalone", Status: "available", Engine: "postgres", Address: "standalone.example.internal", Port: 5432},
+				{ID: "aurora-1", ClusterID: "aurora", Status: "available"},
+				{ID: "paused", Status: "stopped", Engine: "mysql"},
 			},
-			clusters: []rdstypes.DBCluster{
-				{DBClusterIdentifier: aws.String("aurora"), Status: aws.String("available"), Engine: aws.String("aurora-postgresql"),
-					Endpoint: aws.String("aurora.cluster-example.internal"), Port: aws.Int32(5432)},
+			clusters: []dbCluster{
+				{ID: "aurora", Status: "available", Engine: "aurora-postgresql", Endpoint: "aurora.cluster-example.internal", Port: 5432},
 			},
 		},
 	}
@@ -279,23 +258,57 @@ func TestDiscoverRegion(t *testing.T) {
 }
 
 func TestDiscoverRegionPartialErrors(t *testing.T) {
-	denied := &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not allowed"}
-	clients := regionClients{
-		ec2: &fakeEC2{pages: []*ec2.DescribeInstancesOutput{{Reservations: []ec2types.Reservation{{Instances: []ec2types.Instance{
-			instance("i-web", "web", ec2types.InstanceStateNameRunning, nil),
-		}}}}}},
-		ssm: &fakeSSM{err: denied},
-		rds: &fakeRDS{clusters: []rdstypes.DBCluster{{DBClusterIdentifier: aws.String("aurora"), Status: aws.String("available"),
-			Endpoint: aws.String("aurora.cluster-example.internal"), Port: aws.Int32(3306)}}},
+	denied := func(action string) *PermissionError {
+		return &PermissionError{Profile: "example", Region: "ca-central-1", Action: action, What: "x",
+			Err: &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not allowed"}}
 	}
-	got, err := discoverRegion(context.Background(), clients, discoverOptions{profile: "example", region: "ca-central-1"})
-	if err == nil || !errors.Is(err, denied) {
-		t.Fatalf("err = %v, want wrapping AccessDenied", err)
+	web := []ec2Instance{instance("i-web", "web", "running", nil)}
+	aurora := []dbCluster{{ID: "aurora", Status: "available", Endpoint: "aurora.cluster-example.internal", Port: 3306}}
+	tests := []struct {
+		name        string
+		clients     regionClients
+		wantIDs     []string
+		wantActions []string
+	}{
+		{"ssm denied hides EC2", regionClients{
+			ec2: &fakeEC2{instances: web},
+			ssm: &fakeSSM{err: denied("ssm:DescribeInstanceInformation")},
+			rds: &fakeRDS{clusters: aurora},
+		}, []string{"aurora"}, []string{"ssm:DescribeInstanceInformation"}},
+		{"rds instances denied keeps EC2 and clusters", regionClients{
+			ec2: &fakeEC2{instances: web},
+			ssm: &fakeSSM{infos: []ssmInstanceInfo{{InstanceID: "i-web", PingStatus: "Online"}}},
+			rds: &fakeRDS{clusters: aurora, instErr: denied("rds:DescribeDBInstances")},
+		}, []string{"i-web", "aurora"}, []string{"rds:DescribeDBInstances"}},
+		{"ec2 and rds denied", regionClients{
+			ec2: &fakeEC2{err: denied("ec2:DescribeInstances")},
+			ssm: &fakeSSM{},
+			rds: &fakeRDS{instErr: denied("rds:DescribeDBInstances"), clusterErr: denied("rds:DescribeDBClusters")},
+		}, nil, []string{"ec2:DescribeInstances", "rds:DescribeDBInstances", "rds:DescribeDBClusters"}},
 	}
-	if IsAuthError(err) {
-		t.Error("AccessDenied must not be an auth error")
-	}
-	if len(got) != 1 || got[0].ID != "aurora" {
-		t.Errorf("got %+v, want only the RDS cluster", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := discoverRegion(context.Background(), tt.clients, discoverOptions{profile: "example", region: "ca-central-1"})
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if IsAuthError(err) {
+				t.Error("access denied must not be an auth error")
+			}
+			var actions []string
+			for _, pe := range PermissionErrors(err) {
+				actions = append(actions, pe.Action)
+			}
+			if !reflect.DeepEqual(actions, tt.wantActions) {
+				t.Errorf("permission errors = %v, want %v", actions, tt.wantActions)
+			}
+			var ids []string
+			for _, r := range got {
+				ids = append(ids, r.ID)
+			}
+			if !reflect.DeepEqual(ids, tt.wantIDs) {
+				t.Errorf("resources = %v, want %v", ids, tt.wantIDs)
+			}
+		})
 	}
 }

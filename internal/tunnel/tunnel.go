@@ -1,7 +1,8 @@
 // Package tunnel supervises AWS SSM port-forwarding sessions. Each session
 // runs `aws ssm start-session` as a child process under its own supervisor
 // goroutine, which tracks readiness from the session-manager-plugin output,
-// detects expired credentials and reconnects with backoff.
+// detects expired credentials and IAM access denials, and reconnects with
+// backoff.
 package tunnel
 
 import (
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/core"
 )
 
@@ -439,7 +441,7 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 	defer close(e.done)
 	failures := 0
 	for {
-		upFor, authLine, err := m.runOnce(ctx, e)
+		upFor, authLine, denied, err := m.runOnce(ctx, e)
 		if ctx.Err() != nil {
 			return
 		}
@@ -447,6 +449,15 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 			m.update(e, func(s *Session) {
 				m.setStatusLocked(e, AuthExpired)
 				s.Err = authLine
+			})
+			return
+		}
+		if denied != "" {
+			// Reconnecting cannot fix a missing IAM permission.
+			m.update(e, func(s *Session) {
+				m.setStatusLocked(e, Failed)
+				s.Attempts = failures + 1
+				s.Err = denied
 			})
 			return
 		}
@@ -485,15 +496,25 @@ func exitReason(err error) string {
 	return err.Error()
 }
 
+// deniedReason is the session error when IAM denied action on target.
+func deniedReason(target, action string) string {
+	if action == "" {
+		action = "ssm:StartSession"
+	}
+	return fmt.Sprintf("not allowed to start an SSM session on %s (missing %s). Ask your AWS admin to allow it — see %s",
+		target, action, awsx.IAMDocsURL)
+}
+
 // runOnce runs one process for the session and returns how long it was Up,
-// the first output line matching an auth pattern, and the run error.
-func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, authLine string, err error) {
+// the first output line matching an auth pattern, the denied reason when the
+// output reports an IAM access denial, and the run error.
+func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, authLine, denied string, err error) {
 	cmd := m.opts.Command(ctx, e.spec)
 	if cmd == nil {
-		return 0, "", errors.New("tunnel command builder returned nil")
+		return 0, "", "", errors.New("tunnel command builder returned nil")
 	}
 	if cmd.Cancel == nil {
-		return 0, "", errors.New("tunnel command must be created with exec.CommandContext")
+		return 0, "", "", errors.New("tunnel command must be created with exec.CommandContext")
 	}
 	configureCmd(cmd, m.killAfter)
 	pr, pw := io.Pipe()
@@ -503,7 +524,7 @@ func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, a
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		return 0, "", fmt.Errorf("start %s: %w", filepath.Base(cmd.Path), err)
+		return 0, "", "", fmt.Errorf("start %s: %w", filepath.Base(cmd.Path), err)
 	}
 
 	var upAt time.Time
@@ -521,6 +542,11 @@ func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, a
 			if authLine == "" && isAuthLine(line) {
 				authLine = strings.TrimSpace(line)
 			}
+			if denied == "" {
+				if action, _, ok := awsx.ParseAccessDenied(line); ok {
+					denied = deniedReason(e.spec.Target, action)
+				}
+			}
 			m.onLine(e, line, up)
 		}
 		// Keep draining after a scanner error so the child never blocks on a full pipe.
@@ -537,7 +563,7 @@ func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, a
 	if !upAt.IsZero() {
 		upFor = time.Since(upAt)
 	}
-	return upFor, authLine, err
+	return upFor, authLine, denied, err
 }
 
 func (m *Manager) onLine(e *entry, line string, up bool) {

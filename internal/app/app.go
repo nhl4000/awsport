@@ -18,6 +18,7 @@ import (
 	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/config"
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/login"
 	"github.com/nhl4000/awsport/internal/ports"
 	"github.com/nhl4000/awsport/internal/state"
 	"github.com/nhl4000/awsport/internal/tunnel"
@@ -542,11 +543,11 @@ func (a *App) ShellCmd(r core.Resource) *exec.Cmd {
 }
 
 // LoginCmd returns the SSO login command for SSO profiles, nil otherwise.
-func (a *App) LoginCmd(p core.Profile) *exec.Cmd {
+func (a *App) LoginCmd(p core.Profile) *login.Cmd {
 	if p.Kind != core.AuthSSO {
 		return nil
 	}
-	return awsx.ProfileLoginCmd(a.AWSPath, p.Name)
+	return login.Profile(a.AWSPath, p.Name)
 }
 
 // SSOConfig returns the configured SSO settings with the default session name

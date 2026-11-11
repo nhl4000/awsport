@@ -4,17 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/rds"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/nhl4000/awsport/internal/core"
@@ -133,32 +129,41 @@ type discoverOptions struct {
 	manual       func(profile, region, name string) []core.PortSpec
 }
 
-// rdsAPI is the subset of the RDS client used for discovery.
-type rdsAPI interface {
-	rds.DescribeDBInstancesAPIClient
-	rds.DescribeDBClustersAPIClient
+// ec2API, ssmAPI and rdsAPI are the discovery calls (all pages) of one
+// region; tests use fakes.
+type ec2API interface {
+	describeInstances(ctx context.Context) ([]ec2Instance, error)
 }
 
-// regionClients are the per-region AWS APIs discovery needs; tests use fakes.
+type ssmAPI interface {
+	describeOnlineInstances(ctx context.Context) ([]ssmInstanceInfo, error)
+}
+
+type rdsAPI interface {
+	describeDBInstances(ctx context.Context) ([]dbInstance, error)
+	describeDBClusters(ctx context.Context) ([]dbCluster, error)
+}
+
+// regionClients are the per-region AWS APIs discovery needs.
 type regionClients struct {
-	ec2 ec2.DescribeInstancesAPIClient
-	ssm ssm.DescribeInstanceInformationAPIClient
+	ec2 ec2API
+	ssm ssmAPI
 	rds rdsAPI
 }
 
-func newRegionClients(cfg aws.Config) regionClients {
+func newRegionClients(cfg aws.Config, profile string) regionClients {
 	return regionClients{
-		ec2: ec2.NewFromConfig(cfg),
-		ssm: ssm.NewFromConfig(cfg),
-		rds: rds.NewFromConfig(cfg),
+		ec2: ec2Client{newAPIClient(cfg, profile, "ec2")},
+		ssm: ssmClient{newAPIClient(cfg, profile, "ssm")},
+		rds: rdsClient{newAPIClient(cfg, profile, "rds")},
 	}
 }
 
 // Discover lists EC2 instances (excluding terminated, with SSM ping status,
 // Name tag and awsport:* tags) and RDS DB instances + clusters (writer
 // endpoint) in parallel across regions. Per-region errors are aggregated and
-// returned alongside whatever was found; auth errors are wrapped with
-// ErrCredentials.
+// returned alongside whatever was found: access-denied calls as
+// *PermissionError, auth errors wrapped with ErrCredentials.
 func (d *Discoverer) Discover(ctx context.Context, p core.Profile, regions []string, presets []core.PortSpec,
 	shellDefault string, manual func(profile, region, name string) []core.PortSpec) ([]core.Resource, error) {
 	if len(regions) == 0 {
@@ -176,7 +181,7 @@ func (d *Discoverer) Discover(ctx context.Context, p core.Profile, regions []str
 				errs[i] = err
 				return
 			}
-			results[i], errs[i] = discoverRegion(ctx, newRegionClients(cfg), discoverOptions{
+			results[i], errs[i] = discoverRegion(ctx, newRegionClients(cfg, p.Name), discoverOptions{
 				profile:      p.Name,
 				region:       region,
 				presets:      presets,
@@ -212,13 +217,6 @@ func discoverRegion(ctx context.Context, c regionClients, o discoverOptions) ([]
 	}()
 	wg.Wait()
 
-	var errs []error
-	if ec2Err != nil {
-		errs = append(errs, fmt.Errorf("%s: ec2: %w", o.region, ec2Err))
-	}
-	if rdsErr != nil {
-		errs = append(errs, fmt.Errorf("%s: rds: %w", o.region, rdsErr))
-	}
 	out := append(ec2Res, rdsRes...)
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -230,31 +228,17 @@ func discoverRegion(ctx context.Context, c regionClients, o discoverOptions) ([]
 		}
 		return a.ID < b.ID
 	})
-	return out, errors.Join(errs...)
+	return out, errors.Join(ec2Err, rdsErr)
 }
 
+// discoverEC2 lists live EC2 instances with their SSM status. Without the
+// SSM status no instance is reported: all would look unreachable.
 func discoverEC2(ctx context.Context, c regionClients, o discoverOptions) ([]core.Resource, error) {
-	var instances []ec2types.Instance
-	pager := ec2.NewDescribeInstancesPaginator(c.ec2, &ec2.DescribeInstancesInput{
-		Filters: []ec2types.Filter{{
-			Name:   aws.String("instance-state-name"),
-			Values: []string{"pending", "running", "shutting-down", "stopping", "stopped"},
-		}},
-	})
-	for pager.HasMorePages() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("describe instances: %w", err)
-		}
-		for _, res := range page.Reservations {
-			for _, inst := range res.Instances {
-				if inst.State != nil && inst.State.Name == ec2types.InstanceStateNameTerminated {
-					continue
-				}
-				instances = append(instances, inst)
-			}
-		}
+	instances, err := c.ec2.describeInstances(ctx)
+	if err != nil {
+		return nil, err
 	}
+	instances = slices.DeleteFunc(instances, func(inst ec2Instance) bool { return inst.State == "terminated" })
 	if len(instances) == 0 {
 		return nil, nil
 	}
@@ -271,41 +255,28 @@ func discoverEC2(ctx context.Context, c regionClients, o discoverOptions) ([]cor
 }
 
 // ssmOnline returns the IDs of managed instances whose SSM ping status is Online.
-func ssmOnline(ctx context.Context, api ssm.DescribeInstanceInformationAPIClient) (map[string]bool, error) {
+func ssmOnline(ctx context.Context, api ssmAPI) (map[string]bool, error) {
+	infos, err := api.describeOnlineInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
 	online := map[string]bool{}
-	pager := ssm.NewDescribeInstanceInformationPaginator(api, &ssm.DescribeInstanceInformationInput{
-		Filters: []ssmtypes.InstanceInformationStringFilter{{
-			Key:    aws.String("PingStatus"),
-			Values: []string{string(ssmtypes.PingStatusOnline)},
-		}},
-	})
-	for pager.HasMorePages() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("describe SSM instance information: %w", err)
-		}
-		for _, info := range page.InstanceInformationList {
-			if info.PingStatus == ssmtypes.PingStatusOnline {
-				online[aws.ToString(info.InstanceId)] = true
-			}
+	for _, info := range infos {
+		if info.PingStatus == ssmPingOnline {
+			online[info.InstanceID] = true
 		}
 	}
 	return online, nil
 }
 
-func ec2Resource(inst ec2types.Instance, online map[string]bool, o discoverOptions) core.Resource {
+func ec2Resource(inst ec2Instance, online map[string]bool, o discoverOptions) core.Resource {
 	tags := map[string]string{}
 	for _, t := range inst.Tags {
-		tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+		tags[t.Key] = t.Value
 	}
-	id := aws.ToString(inst.InstanceId)
 	name := strings.TrimSpace(tags["Name"])
 	if name == "" {
-		name = id
-	}
-	state := ""
-	if inst.State != nil {
-		state = string(inst.State.Name)
+		name = inst.ID
 	}
 	shell := strings.TrimSpace(tags[core.TagShell])
 	if shell == "" {
@@ -323,59 +294,43 @@ func ec2Resource(inst ec2types.Instance, online map[string]bool, o discoverOptio
 		Kind:         core.KindEC2,
 		Profile:      o.profile,
 		Region:       o.region,
-		ID:           id,
+		ID:           inst.ID,
 		Name:         name,
-		State:        state,
-		SSMOnline:    online[id],
+		State:        inst.State,
+		SSMOnline:    online[inst.ID],
 		IsBastion:    strings.EqualFold(strings.TrimSpace(tags[core.TagBastion]), "true"),
 		Ports:        mergePorts(o.presets, parsePortsTag(tags[core.TagPorts]), manual),
 		ShellCommand: shell,
 	}
 	switch {
-	case state != string(ec2types.InstanceStateNameRunning):
-		r.Unreachable = "instance " + state
+	case inst.State != "running":
+		r.Unreachable = "instance " + inst.State
 	case !r.SSMOnline:
 		r.Unreachable = reasonSSMOffline
 	}
 	return r
 }
 
+// discoverRDS lists standalone DB instances and DB clusters (writer
+// endpoint). Both calls run even if one fails, so a single missing permission
+// still shows what the other returns.
 func discoverRDS(ctx context.Context, api rdsAPI, o discoverOptions) ([]core.Resource, error) {
 	var out []core.Resource
-	instPager := rds.NewDescribeDBInstancesPaginator(api, &rds.DescribeDBInstancesInput{})
-	for instPager.HasMorePages() {
-		page, err := instPager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("describe DB instances: %w", err)
+	instances, instErr := api.describeDBInstances(ctx)
+	for _, db := range instances {
+		if db.ClusterID != "" {
+			continue // reached through the cluster's writer endpoint
 		}
-		for _, db := range page.DBInstances {
-			if aws.ToString(db.DBClusterIdentifier) != "" {
-				continue // reached through the cluster's writer endpoint
-			}
-			var host string
-			var port int32
-			if db.Endpoint != nil {
-				host, port = aws.ToString(db.Endpoint.Address), aws.ToInt32(db.Endpoint.Port)
-			}
-			out = append(out, rdsResource(o, aws.ToString(db.DBInstanceIdentifier),
-				aws.ToString(db.DBInstanceStatus), host, port, aws.ToString(db.Engine)))
-		}
+		out = append(out, rdsResource(o, db.ID, db.Status, db.Address, db.Port, db.Engine))
 	}
-	clusterPager := rds.NewDescribeDBClustersPaginator(api, &rds.DescribeDBClustersInput{})
-	for clusterPager.HasMorePages() {
-		page, err := clusterPager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("describe DB clusters: %w", err)
-		}
-		for _, cl := range page.DBClusters {
-			out = append(out, rdsResource(o, aws.ToString(cl.DBClusterIdentifier),
-				aws.ToString(cl.Status), aws.ToString(cl.Endpoint), aws.ToInt32(cl.Port), aws.ToString(cl.Engine)))
-		}
+	clusters, clusterErr := api.describeDBClusters(ctx)
+	for _, cl := range clusters {
+		out = append(out, rdsResource(o, cl.ID, cl.Status, cl.Endpoint, cl.Port, cl.Engine))
 	}
-	return out, nil
+	return out, errors.Join(instErr, clusterErr)
 }
 
-func rdsResource(o discoverOptions, id, status, host string, port int32, engine string) core.Resource {
+func rdsResource(o discoverOptions, id, status, host string, port int, engine string) core.Resource {
 	r := core.Resource{
 		Kind:    core.KindRDS,
 		Profile: o.profile,
@@ -384,7 +339,7 @@ func rdsResource(o discoverOptions, id, status, host string, port int32, engine 
 		Name:    id,
 		State:   status,
 		Host:    host,
-		Port:    int(port),
+		Port:    port,
 		Engine:  engine,
 	}
 	switch {

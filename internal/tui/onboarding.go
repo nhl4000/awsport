@@ -16,6 +16,7 @@ import (
 	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/config"
 	"github.com/nhl4000/awsport/internal/deps"
+	"github.com/nhl4000/awsport/internal/login"
 )
 
 type onbStep int
@@ -211,7 +212,7 @@ func (m *model) updateOnboardingMsg(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		m.onb.working = "waiting for SSO login in your browser"
 		session := m.a.SSOConfig().Session
-		return tea.ExecProcess(awsx.SSOLoginCmd(m.awsPath(), session), func(err error) tea.Msg { return onbLoginMsg{err: err} }), true
+		return tea.Exec(login.SSOSession(m.a.AWSPath, session), func(err error) tea.Msg { return onbLoginMsg{err: err} }), true
 	case onbLoginMsg:
 		if msg.err != nil {
 			return m.onbFail(fmt.Errorf("SSO login: %w", msg.err), onbSSOChoice, m.ensureAndLogin), true
