@@ -48,6 +48,7 @@ type Cmd struct {
 	stdout, stderr io.Writer
 
 	openBrowser func(string) error
+	shortLink   func(target string) (short string, stop func(), err error) // nil: no short link
 	wsl         bool
 	settle      time.Duration
 }
@@ -70,6 +71,7 @@ func newCmd(awsPath, flag, name string) *Cmd {
 		awsPath:     awsPath,
 		target:      []string{flag, name},
 		openBrowser: open.Browser,
+		shortLink:   startShortLink,
 		wsl:         deps.IsWSL(),
 		settle:      settleDelay,
 	}
@@ -131,7 +133,7 @@ func (c *Cmd) attempt(ctx context.Context, noBrowser bool, stdin io.Reader, stdo
 	if f, ok := stdin.(*os.File); ok {
 		cmd.Stdin = f
 	}
-	w := &watcher{out: stdout, hyperlinks: isTerminal(stdout), settle: c.settle}
+	w := &watcher{out: stdout, hyperlinks: isTerminal(stdout), settle: c.settle, shorten: c.shortLink}
 	if noBrowser {
 		w.open = c.openBrowser
 	}
@@ -157,6 +159,7 @@ type watcher struct {
 	out        io.Writer          // where the sign-in block goes
 	hyperlinks bool               // wrap the link in an OSC 8 hyperlink
 	open       func(string) error // nil: the CLI opens the browser itself
+	shorten    func(string) (string, func(), error)
 	settle     time.Duration
 
 	log       []byte // trailing output, at most maxTranscript bytes
@@ -164,6 +167,7 @@ type watcher struct {
 	timer     *time.Timer
 	announced bool
 	done      bool
+	stopShort func() // shuts the short-link server down
 }
 
 // stream is one output stream of the CLI, copied to dst and scanned by line.
@@ -229,6 +233,10 @@ func (w *watcher) finish() {
 	if w.timer != nil {
 		w.timer.Stop()
 	}
+	if w.stopShort != nil {
+		w.stopShort()
+		w.stopShort = nil
+	}
 }
 
 func (w *watcher) transcript() string {
@@ -244,13 +252,16 @@ func (w *watcher) announce() {
 	if link == "" {
 		return
 	}
-	shown := link
-	if w.hyperlinks {
-		shown = "\x1b]8;;" + link + "\x1b\\" + link + "\x1b]8;;\x1b\\"
-	}
 	var b strings.Builder
 	b.WriteString("\n──────── awsport ────────\n")
-	b.WriteString("Sign in to AWS with this link:\n\n  " + shown + "\n")
+	b.WriteString("Sign in to AWS with this link:\n\n")
+	if w.shorten != nil {
+		if short, stop, err := w.shorten(link); err == nil {
+			w.stopShort = stop
+			b.WriteString("  " + w.hyperlink(short) + "   (short link, forwards to the full link below)\n")
+		}
+	}
+	b.WriteString("  " + w.hyperlink(link) + "\n")
 	if code != "" {
 		b.WriteString("\nCode: " + code + "\n")
 	}
@@ -267,6 +278,14 @@ func (w *watcher) announce() {
 	}
 	b.WriteString("─────────────────────────\n\n")
 	_, _ = io.WriteString(w.out, b.String())
+}
+
+// hyperlink wraps u in an OSC 8 hyperlink when the output is a terminal.
+func (w *watcher) hyperlink(u string) string {
+	if !w.hyperlinks {
+		return u
+	}
+	return "\x1b]8;;" + u + "\x1b\\" + u + "\x1b]8;;\x1b\\"
 }
 
 // shortReason is a brief, human cause for a failed browser launch.

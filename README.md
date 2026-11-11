@@ -90,8 +90,10 @@ Run `awsport`. On first start it walks you through onboarding:
    - reuse an existing `[sso-session]` already in `~/.aws/config`;
    - enter the start URL (e.g. `https://d-0000000000.awsapps.com/start`) and region.
 3. **Login** — awsport runs `aws sso login`, shows the sign-in link and code,
-   and opens your browser (on WSL via `wslview` or Windows directly). If no
-   browser can be opened, click or copy the link instead.
+   and opens your browser (on WSL via `wslview` or Windows directly). Next to
+   the long AWS link it prints a short `http://localhost:17777` link that
+   forwards to it while the login is waiting; both are clickable, and the short
+   one is easy to copy or retype if no browser can be opened.
 4. **Profile sync** — awsport lists every account and role you can access and
    writes one profile per pair, named `<account-name>-<role-name>`, into a
    clearly marked block in `~/.aws/config`:
