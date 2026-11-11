@@ -164,7 +164,7 @@ func (m *model) buildChoices() {
 	}
 	cs = append(cs, ssoChoice{choiceImport, "Import team config", "URL or file path shared by your team (SSO, regions, port presets, groups)"})
 	if f := m.onb.found; f.ok {
-		cs = append(cs, ssoChoice{choiceReuse, "Reuse sso-session " + f.name, fmt.Sprintf("found in %s: %s (%s)", awsx.ConfigFilePath(), f.url, f.region)})
+		cs = append(cs, ssoChoice{choiceReuse, "Reuse sso-session " + f.name, fmt.Sprintf("found in %s: %s (%s)", awsx.DisplayPath(awsx.ConfigFilePath()), f.url, f.region)})
 	}
 	cs = append(cs, ssoChoice{choiceManual, "Enter SSO start URL and region", "from your AWS access portal"})
 	if len(m.profiles) > 0 {
@@ -207,7 +207,7 @@ func (m *model) updateOnboardingMsg(msg tea.Msg) (tea.Cmd, bool) {
 		return m.ensureAndLogin(), true
 	case ensureMsg:
 		if msg.err != nil {
-			return m.onbFail(fmt.Errorf("write sso-session to %s: %w", awsx.ConfigFilePath(), msg.err), onbSSOChoice, m.ensureAndLogin), true
+			return m.onbFail(fmt.Errorf("write sso-session to %s: %w", awsx.DisplayPath(awsx.ConfigFilePath()), msg.err), onbSSOChoice, m.ensureAndLogin), true
 		}
 		m.onb.working = "waiting for SSO login in your browser"
 		session := m.a.SSOConfig().Session

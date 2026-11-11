@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	ssoapi "github.com/aws/aws-sdk-go-v2/service/sso"
 
 	"github.com/nhl4000/awsport/internal/config"
@@ -62,8 +63,15 @@ func ListSSOAccess(ctx context.Context, sso config.SSO) ([]SSOProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := ssoapi.New(ssoapi.Options{Region: strings.TrimSpace(sso.Region)})
-	return listSSOAccess(ctx, client, token, strings.TrimSpace(sso.Region))
+	region := strings.TrimSpace(sso.Region)
+	// Load shared config so AWS_ENDPOINT_URL, AWS_CA_BUNDLE, retry and proxy
+	// settings apply. The SSO portal API is bearer-token authenticated, so no
+	// profile credentials are needed here.
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("list SSO access: load AWS config: %w", err)
+	}
+	return listSSOAccess(ctx, ssoapi.NewFromConfig(cfg), token, region)
 }
 
 func ssoCacheDir() string {

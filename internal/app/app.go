@@ -98,7 +98,7 @@ func (a *App) Profile(name string) (core.Profile, error) {
 			return p, nil
 		}
 	}
-	return core.Profile{}, fmt.Errorf("profile %q not found in %s", name, awsx.ConfigFilePath())
+	return core.Profile{}, fmt.Errorf("profile %q not found in %s", name, awsx.DisplayPath(awsx.ConfigFilePath()))
 }
 
 // Discover runs a fresh discovery of every configured region of p and

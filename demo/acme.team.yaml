@@ -1,0 +1,11 @@
+# Team config for the fictional "acme" org used by the README demo.
+sso:
+  start_url: https://acme.awsapps.com/start
+  region: us-east-1
+  session: acme
+regions: [us-east-1]
+groups:
+  - name: staging-dev
+    members:
+      - { profile: acme-staging-developer, kind: ec2, name: web-app, remote: 8025 }
+      - { profile: acme-staging-developer, kind: rds, name: app-db, remote: 5432 }

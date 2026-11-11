@@ -48,7 +48,7 @@ func newInitCmd() *cobra.Command {
 					return err
 				}
 				if adopted != "" {
-					fmt.Fprintf(out, "Using sso-session %q from %s\n", adopted, awsx.ConfigFilePath())
+					fmt.Fprintf(out, "Using sso-session %q from %s\n", adopted, awsx.DisplayPath(awsx.ConfigFilePath()))
 				} else {
 					return errors.New("nothing to configure: pass --from or --start-url/--region, or run `awsport` for interactive onboarding")
 				}

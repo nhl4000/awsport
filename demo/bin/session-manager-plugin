@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake Session Manager plugin for recording the README demo.
+echo "1.2.707.0"

@@ -47,7 +47,7 @@ func newLoginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "Synced %d profiles into %s\n", n, awsx.ConfigFilePath())
+			fmt.Fprintf(out, "Synced %d profiles into %s\n", n, awsx.DisplayPath(awsx.ConfigFilePath()))
 			return nil
 		},
 	}

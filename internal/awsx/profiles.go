@@ -42,6 +42,22 @@ func homeDir() string {
 	return home
 }
 
+// DisplayPath shortens a path under the home directory to "~/..." for
+// user-facing messages.
+func DisplayPath(p string) string {
+	home := homeDir()
+	if home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if rel, ok := strings.CutPrefix(p, home+string(filepath.Separator)); ok {
+		return filepath.Join("~", rel)
+	}
+	return p
+}
+
 func expandHome(p string) string {
 	if p == "~" {
 		return homeDir()

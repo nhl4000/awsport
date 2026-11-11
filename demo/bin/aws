@@ -1,0 +1,34 @@
+#!/bin/sh
+# Fake AWS CLI for recording the README demo (see demo/record.sh).
+# Implements only what awsport shells out to.
+set -eu
+
+case " $* " in
+*" --version "*)
+	echo "aws-cli/2.22.0 Python/3.12.6 Linux/6.8.0 exe/x86_64.ubuntu.24"
+	;;
+*" sso login "*)
+	echo "Attempting to automatically open the SSO authorization page in your default browser."
+	sleep 1
+	cache="$HOME/.aws/sso/cache"
+	mkdir -p "$cache"
+	file="$cache/$(printf '%s' "${DEMO_SSO_SESSION:-acme}" | sha1sum | cut -d' ' -f1).json"
+	expires=$(date -u -d '+8 hours' +%Y-%m-%dT%H:%M:%SZ)
+	cat >"$file" <<EOF
+{"startUrl": "${DEMO_SSO_START_URL}", "region": "us-east-1", "accessToken": "demo-access-token", "expiresAt": "$expires"}
+EOF
+	echo "Successfully logged into Start URL: ${DEMO_SSO_START_URL}"
+	;;
+*" start-session "*)
+	port=$(printf '%s' "$*" | sed -n 's/.*"localPortNumber":\["\([0-9]*\)"\].*/\1/p')
+	sleep 0.6
+	echo "Starting session with SessionId: demo-$(date +%s)"
+	echo "Port ${port} opened for sessionId demo."
+	echo "Waiting for connections..."
+	exec sleep 86400
+	;;
+*)
+	echo "fake aws: unsupported: $*" >&2
+	exit 2
+	;;
+esac
