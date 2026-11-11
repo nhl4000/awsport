@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -424,8 +425,13 @@ func TestListenReplacesStaleSocket(t *testing.T) {
 		t.Fatalf("Listen over stale socket: %v", err)
 	}
 	defer ln.Close()
-	if fi, err := os.Stat(sock); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("socket mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	// Windows ignores permission bits; the user-only state directory protects it there.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("socket mode = %v; want 0600", fi.Mode().Perm())
 	}
 	go func() {
 		for {
