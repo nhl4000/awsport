@@ -109,7 +109,7 @@ func newTestManager(t *testing.T, o Options, modes ...string) (*Manager, *fakeAW
 	}
 	m := NewManager(o)
 	m.killAfter = 2 * time.Second
-	t.Cleanup(m.StopAll)
+	t.Cleanup(func() { _ = m.StopAll() })
 	return m, f
 }
 
@@ -393,14 +393,14 @@ func TestRestartAuthExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitStatus(t, m, spec.Key, AuthExpired)
-	if keys := m.RestartAuthExpired(); !slices.Equal(keys, []string{spec.Key}) {
-		t.Fatalf("RestartAuthExpired = %v", keys)
+	if keys, err := m.RestartAuthExpired(); err != nil || !slices.Equal(keys, []string{spec.Key}) {
+		t.Fatalf("RestartAuthExpired = %v, %v", keys, err)
 	}
 	s := waitStatus(t, m, spec.Key, Up)
 	if s.Spec.LocalPort != spec.LocalPort || s.Attempts != 0 {
 		t.Fatalf("restarted session %+v", s)
 	}
-	if keys := m.RestartAuthExpired(); len(keys) != 0 {
+	if keys, _ := m.RestartAuthExpired(); len(keys) != 0 {
 		t.Fatalf("second RestartAuthExpired = %v, want none", keys)
 	}
 	if err := m.Restart("missing"); err == nil {
@@ -463,6 +463,44 @@ func TestEventsDropOldest(t *testing.T) {
 	}
 	if ev := <-m.Events(); ev.Session.Attempts != 300-eventBuffer {
 		t.Fatalf("oldest kept event = %d, want %d", ev.Session.Attempts, 300-eventBuffer)
+	}
+}
+
+func TestRevOrdersEventsAndSnapshot(t *testing.T) {
+	m, _ := newTestManager(t, Options{}, "up")
+	spec := testSpec("k", "l")
+	if err := m.Start(spec); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, spec.Key, Up)
+	sessions, rev := m.Snapshot()
+	if len(sessions) != 1 || sessions[0].Rev != rev || m.Rev() != rev {
+		t.Fatalf("Snapshot = %+v at rev %d, Rev() = %d", sessions, rev, m.Rev())
+	}
+	var last uint64
+	for len(m.Events()) > 0 {
+		ev := <-m.Events()
+		if ev.Session.Rev <= last {
+			t.Fatalf("event rev %d after %d", ev.Session.Rev, last)
+		}
+		last = ev.Session.Rev
+	}
+	if last != rev {
+		t.Fatalf("last event rev = %d, snapshot rev %d", last, rev)
+	}
+	if err := m.Stop(spec.Key); err != nil {
+		t.Fatal(err)
+	}
+	// The helper may log a line while stopping; Stopped comes last.
+	for len(m.Events()) > 0 {
+		ev := <-m.Events()
+		if ev.Session.Rev != last+1 {
+			t.Fatalf("event rev %d after %d", ev.Session.Rev, last)
+		}
+		last = ev.Session.Rev
+		if len(m.Events()) == 0 && (ev.Session.Status != Stopped || last != m.Rev()) {
+			t.Fatalf("last event = %s rev %d, want stopped rev %d", ev.Session.Status, last, m.Rev())
+		}
 	}
 }
 

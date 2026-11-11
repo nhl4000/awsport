@@ -458,9 +458,9 @@ func (m *model) offerInstall() tea.Cmd {
 		text += " (uses sudo; you may be asked for your password)"
 	}
 	in := c.Install
-	m.confirm = &confirmPrompt{text: text, yes: func() tea.Cmd {
+	m.confirm(text, func() tea.Cmd {
 		return tea.Exec(&installExec{in: in}, func(err error) tea.Msg { return installDoneMsg{err: err} })
-	}}
+	})
 	return nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/nhl4000/awsport/internal/config"
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/deps"
+	"github.com/nhl4000/awsport/internal/open"
 	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
@@ -112,11 +113,55 @@ func lastLogLine(lines []string) string {
 
 // localAddr is the connection string plus a temporary marker.
 func localAddr(spec core.TunnelSpec) string {
+	return app.ConnString(spec) + tempMarker(spec)
+}
+
+// linkAddr is localAddr with the address as a clickable OSC 8 terminal
+// hyperlink when the tunnel likely serves a web UI.
+func linkAddr(spec core.TunnelSpec) string {
 	addr := app.ConnString(spec)
-	if spec.Temporary {
-		addr += " (temporary: saved port busy)"
+	if u, ok := open.URL(spec); ok {
+		addr = hyperlink(u, addr)
 	}
-	return addr
+	return addr + tempMarker(spec)
+}
+
+func tempMarker(spec core.TunnelSpec) string {
+	if spec.Temporary {
+		return " (temporary: saved port busy)"
+	}
+	return ""
+}
+
+// hyperlink wraps text in an OSC 8 hyperlink to target.
+func hyperlink(target, text string) string {
+	return "\x1b]8;;" + target + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+type tunnelAction int
+
+const (
+	actStart tunnelAction = iota
+	actStop
+	actRestart
+)
+
+// portAction is what enter does on a port: stop its active tunnel, or start
+// one (replacing a failed or auth-expired session).
+func portAction(s tunnel.Session, exists bool) tunnelAction {
+	if exists && tunnel.IsActive(s.Status) {
+		return actStop
+	}
+	return actStart
+}
+
+// dashboardAction is what enter does on a dashboard row: stop an active
+// tunnel, restart any other.
+func dashboardAction(s tunnel.Session) tunnelAction {
+	if tunnel.IsActive(s.Status) {
+		return actStop
+	}
+	return actRestart
 }
 
 // humanDuration renders d compactly: 45s, 12m, 3h05m.
@@ -135,7 +180,7 @@ func humanDuration(d time.Duration) string {
 
 // sessionDetail is the dashboard description line for a session.
 func sessionDetail(s tunnel.Session, now time.Time) string {
-	parts := []string{statusText(s), localAddr(s.Spec)}
+	parts := []string{statusText(s), linkAddr(s.Spec)}
 	if !s.Since.IsZero() {
 		parts = append(parts, humanDuration(now.Sub(s.Since)))
 	}

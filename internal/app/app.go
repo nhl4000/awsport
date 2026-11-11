@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nhl4000/awsport/internal/agent"
 	"github.com/nhl4000/awsport/internal/awsx"
 	"github.com/nhl4000/awsport/internal/config"
 	"github.com/nhl4000/awsport/internal/core"
@@ -34,7 +35,7 @@ const defaultSSOSession = "awsport"
 type App struct {
 	Cfg     *config.Config
 	State   *state.Store
-	Tunnels *tunnel.Manager
+	Tunnels tunnel.Controller
 	AWS     *awsx.Discoverer
 	AWSPath string
 
@@ -49,7 +50,12 @@ type cacheEntry struct {
 	resources []core.Resource
 }
 
-// New loads config and state and builds the tunnel manager from config.
+// Version is the build version of the running binary. The agent client
+// compares it with the background agent's; the CLI sets it at startup.
+var Version = "dev"
+
+// New loads config and state and connects (lazily) to the background agent
+// that owns the tunnels.
 func New() (*App, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -63,15 +69,10 @@ func New() (*App, error) {
 	if p, err := exec.LookPath("aws"); err == nil {
 		awsPath = p
 	}
-	mgr := tunnel.NewManager(tunnel.Options{
-		AWSPath:     awsPath,
-		Reconnect:   cfg.ReconnectEnabled(),
-		MaxFailures: cfg.MaxFail(),
-	})
 	return &App{
 		Cfg:     cfg,
 		State:   st,
-		Tunnels: mgr,
+		Tunnels: agent.NewClient(Version),
 		AWS:     awsx.NewDiscoverer(),
 		AWSPath: awsPath,
 		cache:   map[string]cacheEntry{},
@@ -223,7 +224,7 @@ func (a *App) Connect(ctx context.Context, r core.Resource, remote int) (core.Tu
 
 	a.connectMu.Lock()
 	defer a.connectMu.Unlock()
-	if s, ok := a.Tunnels.Get(spec.Key); ok && isActive(s.Status) {
+	if s, ok := a.Tunnels.Get(spec.Key); ok && tunnel.IsActive(s.Status) {
 		return s.Spec, nil
 	}
 	port, temporary, err := a.assignPort(state.PortKey(r.Profile, r.Region, r.Name, remote), spec.Key, remote)
@@ -262,10 +263,6 @@ func (a *App) assignPort(portKey, tunnelKey string, remote int) (int, bool, erro
 		})
 	}
 	return ports.Assign(portKey, remote, saved, reserved, save)
-}
-
-func isActive(s tunnel.Status) bool {
-	return s == tunnel.Starting || s == tunnel.Up || s == tunnel.Reconnecting
 }
 
 func portLabel(r core.Resource, remote int) string {
@@ -629,9 +626,23 @@ func (a *App) SyncSSOProfiles(ctx context.Context) (int, error) {
 	return len(profiles), nil
 }
 
-// Close stops every tunnel.
+// Close releases the connection to the tunnel controller. It never stops
+// tunnels; use StopAll for that.
 func (a *App) Close() {
-	a.Tunnels.StopAll()
+	if c, ok := a.Tunnels.(interface{ Close() }); ok {
+		c.Close()
+	}
+}
+
+// StopAll stops every tunnel.
+func (a *App) StopAll() error {
+	return a.Tunnels.StopAll()
+}
+
+// AgentRunning reports whether a background agent is reachable. It never
+// starts one.
+func (a *App) AgentRunning() bool {
+	return agent.Running()
 }
 
 // ConnString is the local address of a tunnel.

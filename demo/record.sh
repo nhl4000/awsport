@@ -51,3 +51,5 @@ for tape in cli tui; do
 	echo "recording assets/$tape.gif"
 	env "${env_vars[@]}" vhs "demo/$tape.tape"
 done
+# Stop any tunnels (and with them the background agent) left by the tapes.
+env "${env_vars[@]}" awsport down --all >/dev/null 2>&1 || true

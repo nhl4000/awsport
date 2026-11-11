@@ -7,11 +7,11 @@ func bind(help, desc string, keys ...string) key.Binding {
 }
 
 var keys = struct {
-	Up, Down, Enter, Back, Filter                      key.Binding
-	ShowAll, AddPort, Refresh, Shell                   key.Binding
-	Dashboard, Groups, Login, Quit, ForceQuit, Onboard key.Binding
-	Select, SaveGroup, Copy, Stop, Restart, Delete     key.Binding
-	Install, Recheck, Skip, Yes, No, NextField         key.Binding
+	Up, Down, Enter, Back, Filter                        key.Binding
+	ShowAll, AddPort, Refresh, Shell                     key.Binding
+	Dashboard, Groups, Login, Quit, ForceQuit, Onboard   key.Binding
+	Select, SaveGroup, Copy, Stop, Restart, Delete, Open key.Binding
+	Install, Recheck, Skip, Yes, No, NextField           key.Binding
 }{
 	Up:        bind("↑/k", "up", "up", "k"),
 	Down:      bind("↓/j", "down", "down", "j"),
@@ -34,11 +34,12 @@ var keys = struct {
 	Stop:      bind("x", "stop", "x"),
 	Restart:   bind("r", "restart", "r"),
 	Delete:    bind("d", "delete", "d"),
+	Open:      bind("o", "open in browser", "o"),
 	Install:   bind("i", "install", "i"),
 	Recheck:   bind("r", "recheck", "r"),
 	Skip:      bind("s", "skip", "s"),
 	Yes:       bind("y", "yes", "y", "Y"),
-	No:        bind("n", "no", "n", "N", "esc"),
+	No:        bind("n/esc", "cancel", "n", "N", "esc", "q"),
 	NextField: bind("tab", "next field", "tab", "shift+tab", "down", "up"),
 }
 

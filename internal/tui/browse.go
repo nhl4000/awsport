@@ -279,7 +279,11 @@ func (m *model) rebuildPorts() tea.Cmd {
 	for _, p := range r.Ports {
 		desc := "enter to start a tunnel"
 		if s, ok := m.a.Tunnels.Get(r.TunnelKey(p.Remote)); ok && s.Status != tunnel.Stopped {
-			desc = statusGlyph(s.Status) + " " + statusText(s) + " · " + localAddr(s.Spec)
+			hint := "enter to retry, x to dismiss"
+			if tunnel.IsActive(s.Status) {
+				hint = "enter to stop"
+			}
+			desc = statusGlyph(s.Status) + " " + statusText(s) + " · " + linkAddr(s.Spec) + " · " + hint
 		}
 		items = append(items, item{title: p.String(), desc: desc, key: "port:" + strconv.Itoa(p.Remote)})
 	}
@@ -290,30 +294,63 @@ func (m *model) rebuildPorts() tea.Cmd {
 	return m.setItems(scrPorts, items)
 }
 
+// selectedPort returns the remote port under the cursor and its session.
+func (m *model) selectedPort() (remote int, s tunnel.Session, exists, ok bool) {
+	k, ok := selectedKey(m.lists[scrPorts])
+	if !ok || !strings.HasPrefix(k, "port:") {
+		return 0, tunnel.Session{}, false, false
+	}
+	remote, err := strconv.Atoi(strings.TrimPrefix(k, "port:"))
+	if err != nil {
+		return 0, tunnel.Session{}, false, false
+	}
+	s, exists = m.a.Tunnels.Get(m.curRes.TunnelKey(remote))
+	if exists && s.Status == tunnel.Stopped {
+		exists = false
+	}
+	return remote, s, exists, true
+}
+
 func (m *model) portsKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.AddPort):
 		return true, m.promptManualPort(m.curRes)
 	case key.Matches(msg, keys.Shell):
 		return true, m.shell(m.curRes)
+	case key.Matches(msg, keys.Stop, keys.Open, keys.Copy):
+		remote, s, exists, ok := m.selectedPort()
+		switch {
+		case !ok:
+			m.setErr(fmt.Errorf("%w: no port under the cursor", errNoSelection))
+		case !exists:
+			m.setFlash(fmt.Sprintf("%s:%d is not running; enter starts it", m.curRes.Name, remote))
+		case key.Matches(msg, keys.Stop):
+			return true, m.stopTunnel(s.Spec)
+		case key.Matches(msg, keys.Open):
+			m.openURL(s.Spec)
+		default:
+			m.copyConn(s.Spec)
+		}
+		return true, nil
 	case key.Matches(msg, keys.Enter):
 		k, ok := selectedKey(m.lists[scrPorts])
 		if !ok {
 			return true, nil
 		}
-		switch {
-		case k == "add":
+		switch k {
+		case "add":
 			return true, m.promptManualPort(m.curRes)
-		case k == "shell":
+		case "shell":
 			return true, m.shell(m.curRes)
-		case strings.HasPrefix(k, "port:"):
-			remote, err := strconv.Atoi(strings.TrimPrefix(k, "port:"))
-			if err != nil {
-				return true, nil
-			}
-			return true, m.connect(m.curRes, remote)
 		}
-		return true, nil
+		remote, s, exists, ok := m.selectedPort()
+		if !ok {
+			return true, nil
+		}
+		if portAction(s, exists) == actStop {
+			return true, m.stopTunnel(s.Spec)
+		}
+		return true, m.connect(m.curRes, remote)
 	}
 	return false, nil
 }

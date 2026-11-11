@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
 func TestParseTarget(t *testing.T) {
@@ -79,5 +81,44 @@ func TestRemotePort(t *testing.T) {
 				t.Fatalf("remotePort = %d, %v; want %d", got, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestOwnKeys(t *testing.T) {
+	spec := func(key string) core.TunnelSpec { return core.TunnelSpec{Key: key} }
+	before := map[string]bool{"running": true}
+	got := ownKeys(before, []core.TunnelSpec{spec("new"), spec("running"), spec("other"), spec("new")})
+	if !slices.Equal(got, []string{"new", "other"}) {
+		t.Fatalf("ownKeys = %v, want [new other]", got)
+	}
+	if got := ownKeys(before, []core.TunnelSpec{spec("running")}); len(got) != 0 {
+		t.Fatalf("ownKeys = %v, want none", got)
+	}
+}
+
+func TestActiveKeys(t *testing.T) {
+	sessions := []tunnel.Session{
+		{Spec: core.TunnelSpec{Key: "up"}, Status: tunnel.Up},
+		{Spec: core.TunnelSpec{Key: "failed"}, Status: tunnel.Failed},
+		{Spec: core.TunnelSpec{Key: "starting"}, Status: tunnel.Starting},
+	}
+	got := activeKeys(sessions)
+	if len(got) != 2 || !got["up"] || !got["starting"] {
+		t.Fatalf("activeKeys = %v", got)
+	}
+}
+
+func TestAnyActive(t *testing.T) {
+	sessions := map[string]tunnel.Status{"mine-failed": tunnel.Failed, "mine-up": tunnel.Up, "other": tunnel.Up}
+	get := func(key string) (tunnel.Session, bool) {
+		st, ok := sessions[key]
+		return tunnel.Session{Status: st}, ok
+	}
+	if !anyActive(get, []string{"mine-failed", "mine-up"}) {
+		t.Fatal("an own tunnel is up")
+	}
+	// Tunnels started by someone else do not keep `up` running.
+	if anyActive(get, []string{"mine-failed", "mine-gone"}) {
+		t.Fatal("no own tunnel is active")
 	}
 }

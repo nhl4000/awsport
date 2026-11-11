@@ -51,16 +51,17 @@ func NeedsOnboarding(a *app.App) bool {
 	return err != nil || len(ps) == 0
 }
 
-// Run starts the full-screen UI and blocks until the user quits. All tunnels
-// are stopped before it returns.
+// Run starts the full-screen UI and blocks until the user quits. Tunnels
+// still running when it returns stay up in the background agent.
 func Run(a *app.App) error {
 	m := newModel(a)
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	m.cancel()
-	if n := a.Tunnels.ActiveCount(); n > 0 {
-		fmt.Fprintf(os.Stderr, "awsport: stopping %d tunnel(s)…\n", n)
-	}
+	n := a.Tunnels.ActiveCount()
 	a.Close()
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "awsport: %d tunnel(s) still running in the background (awsport ps lists them, awsport down --all stops them)\n", n)
+	}
 	if err != nil {
 		return fmt.Errorf("run tui: %w", err)
 	}
@@ -89,11 +90,6 @@ type pendingConnect struct {
 	remote int
 }
 
-type confirmPrompt struct {
-	text string
-	yes  func() tea.Cmd
-}
-
 type inputPrompt struct {
 	label  string
 	ti     textinput.Model
@@ -114,8 +110,11 @@ type (
 	eventMsg        tunnel.Event
 	eventsClosedMsg struct{}
 	tickMsg         struct{}
-	quitMsg         struct{}
-	depsMsg         struct {
+	resumedMsg      struct {
+		n       int
+		warning string
+	}
+	depsMsg struct {
 		checks     []deps.Check
 		background bool
 	}
@@ -146,8 +145,11 @@ type (
 	}
 	shellDoneMsg struct{ err error }
 	loginDoneMsg struct{ err error }
-	restartedMsg struct{ keys []string }
-	tunnelOpMsg  struct {
+	restartedMsg struct {
+		keys []string
+		err  error
+	}
+	tunnelOpMsg struct {
 		verb, label string
 		err         error
 	}
@@ -187,8 +189,9 @@ type model struct {
 	flashErr     bool
 	authProfiles map[string]bool // profiles whose AWS calls failed with auth errors
 	depsWarning  string
+	started      time.Time // UI start; older Up events are snapshots, not news
 
-	confirm    *confirmPrompt
+	modal      *modal
 	input      *inputPrompt
 	loginQueue []*exec.Cmd
 
@@ -215,6 +218,7 @@ func newModel(a *app.App) *model {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &model{
 		a:            a,
+		started:      time.Now(),
 		ctx:          ctx,
 		cancel:       cancel,
 		events:       a.Tunnels.Events(),
@@ -299,7 +303,7 @@ func selectedKey(l *list.Model) (string, bool) {
 }
 
 func (m *model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.waitEvent(), m.tick()}
+	cmds := []tea.Cmd{m.waitEvent(), m.tick(), m.checkResumed()}
 	if m.screen() == scrOnboarding {
 		cmds = append(cmds, m.checkDeps(false))
 	} else {
@@ -476,8 +480,10 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 		return tea.Batch(m.onEvent(tunnel.Event(msg)), m.waitEvent())
 	case eventsClosedMsg:
 		return nil
-	case quitMsg:
-		return tea.Quit
+	case resumedMsg:
+		return m.onResumed(msg)
+	case stoppedAllMsg:
+		return m.onStoppedAll(msg)
 	case tea.KeyMsg:
 		return m.onKey(msg)
 	case depsMsg:
@@ -506,7 +512,9 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 	case loginDoneMsg:
 		return m.onLoginDone(msg)
 	case restartedMsg:
-		if len(msg.keys) > 0 {
+		if msg.err != nil {
+			m.setErr(fmt.Errorf("restart tunnels: %w", msg.err))
+		} else if len(msg.keys) > 0 {
 			m.setFlash(fmt.Sprintf("logged in; restarting %d tunnel(s)", len(msg.keys)))
 		}
 		return m.rebuildDashboard()
@@ -516,7 +524,7 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 		} else {
 			m.setFlash(fmt.Sprintf("%s %s", msg.verb, msg.label))
 		}
-		return m.rebuildDashboard()
+		return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
 	case groupSavedMsg:
 		return m.onGroupSaved(msg)
 	case groupStartedMsg:
@@ -587,25 +595,14 @@ func (m *model) setItems(id screen, items []list.Item) tea.Cmd {
 }
 
 func (m *model) onKey(msg tea.KeyMsg) tea.Cmd {
-	if m.confirm != nil {
-		c := m.confirm
-		switch {
-		case key.Matches(msg, keys.Yes):
-			m.confirm = nil
-			return c.yes()
-		case key.Matches(msg, keys.ForceQuit):
-			m.confirm = nil
-			return m.stopAndQuit()
-		case key.Matches(msg, keys.No):
-			m.confirm = nil
-		}
-		return nil
-	}
-	if m.input != nil {
-		return m.onInputKey(msg)
+	if m.modal != nil {
+		return m.onModalKey(msg)
 	}
 	if key.Matches(msg, keys.ForceQuit) {
 		return m.quit()
+	}
+	if m.input != nil {
+		return m.onInputKey(msg)
 	}
 	if m.screen() == scrOnboarding {
 		return m.onboardingKey(msg)
@@ -682,25 +679,6 @@ func (m *model) prompt(label, placeholder string, submit func(string) (tea.Cmd, 
 	return m.input.ti.Focus()
 }
 
-func (m *model) quit() tea.Cmd {
-	if n := m.a.Tunnels.ActiveCount(); n > 0 {
-		m.confirm = &confirmPrompt{
-			text: fmt.Sprintf("%d tunnel(s) active. Stop them and quit?", n),
-			yes:  m.stopAndQuit,
-		}
-		return nil
-	}
-	return tea.Quit
-}
-
-func (m *model) stopAndQuit() tea.Cmd {
-	a := m.a
-	return m.run("stopping tunnels", time.Minute, func(context.Context) tea.Msg {
-		a.Close()
-		return quitMsg{}
-	})
-}
-
 // ---- tunnel events ----
 
 func (m *model) onEvent(ev tunnel.Event) tea.Cmd {
@@ -711,13 +689,40 @@ func (m *model) onEvent(ev tunnel.Event) tea.Cmd {
 	case tunnel.Failed:
 		m.flash, m.flashErr = fmt.Sprintf("%s failed: %s", label, ev.Session.Err), true
 	case tunnel.Up:
-		m.setFlash(fmt.Sprintf("%s is up on %s", label, localAddr(ev.Session.Spec)))
+		// Snapshots of tunnels that came up before this UI started are not news.
+		if !ev.Session.Since.Before(m.started) {
+			m.setFlash(fmt.Sprintf("%s is up on %s", label, linkAddr(ev.Session.Spec)))
+		}
 	}
-	cmd := m.rebuildDashboard()
-	if m.screen() == scrPorts {
-		cmd = tea.Batch(cmd, m.rebuildPorts())
+	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
+}
+
+// checkResumed looks for tunnels kept running by the agent since an earlier
+// session. It runs off the UI goroutine since it may connect to the agent.
+func (m *model) checkResumed() tea.Cmd {
+	c := m.a.Tunnels
+	return func() tea.Msg {
+		msg := resumedMsg{n: len(c.Sessions())}
+		if w, ok := c.(interface{ Warning() string }); ok {
+			msg.warning = w.Warning()
+		}
+		return msg
 	}
-	return cmd
+}
+
+func (m *model) onResumed(msg resumedMsg) tea.Cmd {
+	var parts []string
+	if msg.n > 0 {
+		parts = append(parts, fmt.Sprintf("%d tunnel(s) still running in the background", msg.n))
+	}
+	if msg.warning != "" {
+		parts = append(parts, oneLine(msg.warning))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	m.flash, m.flashErr = strings.Join(parts, "; "), msg.warning != ""
+	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
 }
 
 // ---- login ----
@@ -784,7 +789,8 @@ func (m *model) onLoginDone(msg loginDoneMsg) tea.Cmd {
 	mgr := m.a.Tunnels
 	cmds := []tea.Cmd{
 		m.run("restarting tunnels", tunnelOpTimeout, func(context.Context) tea.Msg {
-			return restartedMsg{keys: mgr.RestartAuthExpired()}
+			keys, err := mgr.RestartAuthExpired()
+			return restartedMsg{keys: keys, err: err}
 		}),
 		m.checkAllCreds(),
 	}
@@ -836,9 +842,12 @@ func (m *model) View() string {
 		parts = append(parts, p)
 	}
 	var body string
-	if m.screen() == scrOnboarding {
+	switch {
+	case m.modal != nil:
+		body = lipgloss.Place(m.width-4, m.bodyHeight(), lipgloss.Center, lipgloss.Center, m.modalView(m.width-4))
+	case m.screen() == scrOnboarding:
 		body = m.onboardingView()
-	} else {
+	default:
 		body = m.activeList().View()
 	}
 	parts = append(parts, lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(bodyStyle.Render(body)))
@@ -901,8 +910,6 @@ func (m *model) footerView() string {
 			l += "\n" + errStyle.Render(m.input.err)
 		}
 		lines = append(lines, l)
-	case m.confirm != nil:
-		lines = append(lines, warnStyle.Bold(true).Render(m.confirm.text)+subtleStyle.Render("  [y/n]"))
 	case len(m.ops) > 0 && m.screen() != scrOnboarding:
 		lines = append(lines, m.spin.View()+" "+m.opLabels())
 	case m.flash != "":
@@ -943,11 +950,14 @@ func (m *model) opLabels() string {
 }
 
 func (m *model) helpKeys() help.KeyMap {
+	if m.modal != nil {
+		if m.modal.kind == modalQuit {
+			return helpKeys{bind("k/q", "keep & quit", "k"), bind("s", "stop all & quit", "s"), bind("esc", "cancel", "esc")}
+		}
+		return helpKeys{keys.Yes, keys.No}
+	}
 	if m.input != nil {
 		return helpKeys{bind("enter", "confirm", "enter"), bind("esc", "cancel", "esc")}
-	}
-	if m.confirm != nil {
-		return helpKeys{keys.Yes, keys.No}
 	}
 	global := []key.Binding{keys.Dashboard, keys.Groups, keys.Login, keys.Quit}
 	switch m.screen() {
@@ -958,11 +968,11 @@ func (m *model) helpKeys() help.KeyMap {
 	case scrResources:
 		return helpKeys(append([]key.Binding{keys.Enter, keys.Filter, keys.ShowAll, keys.AddPort, keys.Shell, keys.Refresh, keys.Back}, global...))
 	case scrPorts:
-		return helpKeys(append([]key.Binding{bind("enter", "connect", "enter"), keys.AddPort, keys.Back}, global...))
+		return helpKeys(append([]key.Binding{bind("enter", "start/stop", "enter"), keys.Stop, keys.Open, keys.Copy, keys.AddPort, keys.Back}, global...))
 	case scrBastion:
 		return helpKeys{bind("enter", "use as bastion", "enter"), keys.Back, keys.Quit}
 	case scrDashboard:
-		return helpKeys{keys.Select, keys.SaveGroup, keys.Copy, keys.Stop, keys.Restart, keys.Login, keys.Groups, keys.Back, keys.Quit}
+		return helpKeys{bind("enter", "stop/restart", "enter"), keys.Select, keys.SaveGroup, keys.Copy, keys.Open, keys.Stop, keys.Restart, keys.Login, keys.Groups, keys.Back, keys.Quit}
 	case scrGroups:
 		return helpKeys{bind("enter", "start group", "enter"), keys.Delete, keys.Filter, keys.Dashboard, keys.Back, keys.Quit}
 	}

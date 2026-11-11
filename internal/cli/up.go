@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -91,10 +92,14 @@ func portList(ps []core.PortSpec) string {
 }
 
 func newUpCmd() *cobra.Command {
-	return &cobra.Command{
+	var detach bool
+	cmd := &cobra.Command{
 		Use:   "up <group | profile/name[:port]>...",
-		Short: "Start tunnels in the foreground (Ctrl-C stops them)",
-		Long: "Start tunnels and keep them running until interrupted.\n\n" +
+		Short: "Start tunnels (in the foreground; -d leaves them in the background)",
+		Long: "Start tunnels and keep them running until interrupted. Ctrl-C stops the\n" +
+			"tunnels this command started; tunnels that were already running stay up.\n" +
+			"With --detach the tunnels keep running in the background after the command\n" +
+			"exits; `awsport ps` lists them and `awsport down` stops them.\n\n" +
 			"Targets are group names or profile/name[:port], where name is an EC2 Name tag\n" +
 			"or RDS identifier and port is a remote port number or port name. RDS targets\n" +
 			"default to the database port.",
@@ -116,12 +121,15 @@ func newUpCmd() *cobra.Command {
 				return err
 			}
 			defer a.Close()
-			return runUp(ctx, a, targets, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runUp(ctx, a, targets, detach, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
+	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "leave the tunnels running in the background and exit")
+	return cmd
 }
 
-func runUp(ctx context.Context, a *app.App, targets []upTarget, out, errOut io.Writer) error {
+func runUp(ctx context.Context, a *app.App, targets []upTarget, detach bool, out, errOut io.Writer) error {
+	before := activeKeys(a.Tunnels.Sessions())
 	var specs []core.TunnelSpec
 	failed := 0
 	for _, t := range targets {
@@ -142,17 +150,29 @@ func runUp(ctx context.Context, a *app.App, targets []upTarget, out, errOut io.W
 		}
 		specs = append(specs, spec)
 	}
+	own := ownKeys(before, specs)
 	if len(specs) == 0 {
 		return fmt.Errorf("no tunnels started (%d failed)", failed)
 	}
 	if err := writeSpecs(out, specs); err != nil {
 		return err
 	}
+	if detach {
+		fmt.Fprintln(out, "Tunnels keep running in the background: `awsport ps` lists them, `awsport down` stops them.")
+		return nil
+	}
+	if len(own) == 0 {
+		fmt.Fprintln(out, "All tunnels were already running; they stay up in the background.")
+		return nil
+	}
+	if n := len(ownKeys(nil, specs)) - len(own); n > 0 {
+		fmt.Fprintf(out, "%d tunnel(s) were already running and stay up after Ctrl-C.\n", n)
+	}
 	fmt.Fprintln(out, "Press Ctrl-C to stop.")
 
-	labels := map[string]string{}
-	for _, s := range specs {
-		labels[s.Key] = s.Label
+	mine := map[string]bool{}
+	for _, k := range own {
+		mine[k] = true
 	}
 	last := map[string]tunnel.Status{}
 	events := a.Tunnels.Events()
@@ -160,23 +180,56 @@ func runUp(ctx context.Context, a *app.App, targets []upTarget, out, errOut io.W
 		select {
 		case <-ctx.Done():
 			fmt.Fprintln(out, "Stopping tunnels…")
-			a.Close()
-			return nil
+			return stopKeys(a.Tunnels, own)
 		case ev, ok := <-events:
 			if !ok {
 				return errors.New("tunnel manager stopped")
 			}
-			if _, mine := labels[ev.Key]; !mine || last[ev.Key] == ev.Session.Status {
+			if !mine[ev.Key] || last[ev.Key] == ev.Session.Status {
 				continue
 			}
 			last[ev.Key] = ev.Session.Status
 			printEvent(out, ev.Session)
-			if a.Tunnels.ActiveCount() == 0 {
-				a.Close()
+			if !anyActive(a.Tunnels.Get, own) {
+				// Remove the failed sessions from the agent as well.
+				_ = stopKeys(a.Tunnels, own)
 				return errors.New("all tunnels have stopped")
 			}
 		}
 	}
+}
+
+// activeKeys returns the keys of the Starting, Up or Reconnecting sessions.
+func activeKeys(sessions []tunnel.Session) map[string]bool {
+	keys := map[string]bool{}
+	for _, s := range sessions {
+		if tunnel.IsActive(s.Status) {
+			keys[s.Spec.Key] = true
+		}
+	}
+	return keys
+}
+
+// ownKeys returns, deduplicated in order, the keys of specs that were not
+// active before: the tunnels this invocation started.
+func ownKeys(before map[string]bool, specs []core.TunnelSpec) []string {
+	var own []string
+	for _, s := range specs {
+		if !before[s.Key] && !slices.Contains(own, s.Key) {
+			own = append(own, s.Key)
+		}
+	}
+	return own
+}
+
+// anyActive reports whether any of keys is Starting, Up or Reconnecting.
+func anyActive(get func(key string) (tunnel.Session, bool), keys []string) bool {
+	for _, k := range keys {
+		if s, ok := get(k); ok && tunnel.IsActive(s.Status) {
+			return true
+		}
+	}
+	return false
 }
 
 func startTarget(ctx context.Context, a *app.App, t upTarget) (core.TunnelSpec, error) {

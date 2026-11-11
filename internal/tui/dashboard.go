@@ -14,6 +14,7 @@ import (
 
 	"github.com/nhl4000/awsport/internal/app"
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/open"
 	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
@@ -58,7 +59,7 @@ func (m *model) selectedSession() (tunnel.Session, bool) {
 }
 
 func (m *model) dashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	if !key.Matches(msg, keys.Select, keys.SaveGroup, keys.Copy, keys.Stop, keys.Restart) {
+	if !key.Matches(msg, keys.Enter, keys.Select, keys.SaveGroup, keys.Copy, keys.Open, keys.Stop, keys.Restart) {
 		return false, nil
 	}
 	if key.Matches(msg, keys.SaveGroup) {
@@ -69,7 +70,7 @@ func (m *model) dashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.setErr(fmt.Errorf("%w: no tunnel under the cursor", errNoSelection))
 		return true, nil
 	}
-	mgr, spec := m.a.Tunnels, s.Spec
+	spec := s.Spec
 	switch {
 	case key.Matches(msg, keys.Select):
 		m.selected[spec.Key] = !m.selected[spec.Key]
@@ -80,16 +81,44 @@ func (m *model) dashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case key.Matches(msg, keys.Copy):
 		m.copyConn(spec)
 		return true, nil
+	case key.Matches(msg, keys.Open):
+		m.openURL(spec)
+		return true, nil
 	case key.Matches(msg, keys.Stop):
-		return true, m.run("stopping "+spec.Label, tunnelOpTimeout, func(context.Context) tea.Msg {
-			mgr.Stop(spec.Key)
-			return tunnelOpMsg{verb: "stopped", label: spec.Label}
-		})
+		return true, m.stopTunnel(spec)
+	case key.Matches(msg, keys.Enter) && dashboardAction(s) == actStop:
+		return true, m.stopTunnel(spec)
 	default:
-		return true, m.run("restarting "+spec.Label, tunnelOpTimeout, func(context.Context) tea.Msg {
-			return tunnelOpMsg{verb: "restarted", label: spec.Label, err: mgr.Restart(spec.Key)}
-		})
+		return true, m.restartTunnel(spec)
 	}
+}
+
+func (m *model) stopTunnel(spec core.TunnelSpec) tea.Cmd {
+	c := m.a.Tunnels
+	return m.run("stopping "+spec.Label, tunnelOpTimeout, func(context.Context) tea.Msg {
+		return tunnelOpMsg{verb: "stopped", label: spec.Label, err: c.Stop(spec.Key)}
+	})
+}
+
+func (m *model) restartTunnel(spec core.TunnelSpec) tea.Cmd {
+	c := m.a.Tunnels
+	return m.run("restarting "+spec.Label, tunnelOpTimeout, func(context.Context) tea.Msg {
+		return tunnelOpMsg{verb: "restarted", label: spec.Label, err: c.Restart(spec.Key)}
+	})
+}
+
+// openURL opens a web tunnel's local URL in the default browser.
+func (m *model) openURL(spec core.TunnelSpec) {
+	u, ok := open.URL(spec)
+	if !ok {
+		m.setFlash(fmt.Sprintf("no web URL for %s; c copies the address", spec.Label))
+		return
+	}
+	if err := open.Browser(u); err != nil {
+		m.setErr(err)
+		return
+	}
+	m.setFlash("opened " + u)
 }
 
 func (m *model) copyConn(spec core.TunnelSpec) {
@@ -228,14 +257,11 @@ func (m *model) groupsKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 	a := m.a
 	if key.Matches(msg, keys.Delete) {
-		m.confirm = &confirmPrompt{
-			text: fmt.Sprintf("Delete group %s? (groups from config files are kept)", name),
-			yes: func() tea.Cmd {
-				return m.run("deleting group "+name, configTimeout, func(context.Context) tea.Msg {
-					return groupDeletedMsg{name: name, err: a.DeleteGroup(name)}
-				})
-			},
-		}
+		m.confirm(fmt.Sprintf("Delete group %s? (groups from config files are kept)", name), func() tea.Cmd {
+			return m.run("deleting group "+name, configTimeout, func(context.Context) tea.Msg {
+				return groupDeletedMsg{name: name, err: a.DeleteGroup(name)}
+			})
+		})
 		return true, nil
 	}
 	return true, m.run("starting group "+name, groupTimeout, func(ctx context.Context) tea.Msg {

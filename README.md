@@ -150,6 +150,26 @@ ports above 55535 are used as-is).
   uses a **temporary** port for this session only and marks it with `*`; the
   saved port is kept for next time.
 
+## Tunnels that outlive the window
+
+Tunnels run inside a small background **agent** (`awsport agent`, started
+automatically with the first tunnel). Quitting the TUI with tunnels active asks:
+
+- **`k` keep running** (or press `q` again) — awsport closes, tunnels stay up (and keep
+  auto-reconnecting). Reopen `awsport` and they're listed with live status.
+- **`s` stop all** — tunnels are closed, then awsport quits.
+- **`esc` cancel**.
+
+The agent exits by itself 30 seconds after the last tunnel is gone. From a
+shell: `awsport ps` lists running tunnels, `awsport down <name>` (or
+`--all`) stops them. The agent listens on a user-only socket in the state
+directory and logs to `agent.log` next to it.
+
+In the TUI, `enter` on a port toggles its tunnel on and off (`x` also stops).
+Web ports show their local address as a clickable link (in terminals that
+support OSC 8 hyperlinks: iTerm2, Windows Terminal, VS Code, GNOME Terminal,
+WezTerm, kitty…); `o` opens it in your browser and `c` copies the address.
+
 ## Configuration
 
 | File                                    | Written by      | Contents                                   |
@@ -204,7 +224,9 @@ identifier) and, if set, region — so groups survive instance replacement.
 | `awsport login`                                 | SSO login, then sync profiles into `~/.aws/config`                          |
 | `awsport login <profile>`                       | `aws sso login --profile <profile>`                                         |
 | `awsport ls [profile] [--all] [--json]`         | list EC2/RDS resources (all profiles when none given)                       |
-| `awsport up <group \| profile/name[:port]>...`  | start tunnels in the foreground; prints `127.0.0.1:<port>`; Ctrl-C stops    |
+| `awsport up <group \| profile/name[:port]>... [-d]` | start tunnels; prints `127.0.0.1:<port>`; Ctrl-C stops the ones it started, `-d` leaves them running in the background |
+| `awsport ps [--json]`                           | list tunnels running in the background agent                                |
+| `awsport down [--all] [name\|group...]`         | stop background tunnels by label, key or group name                          |
 | `awsport groups`                                | list tunnel groups                                                          |
 | `awsport update`                                | self-update from the latest GitHub release (checksum-verified)              |
 | `awsport version`                               | print version                                                               |

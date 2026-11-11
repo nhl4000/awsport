@@ -37,19 +37,40 @@ const (
 
 // Session is a snapshot of one supervised tunnel.
 type Session struct {
-	Spec     core.TunnelSpec
-	Status   Status
-	Err      string    // last failure reason; empty while healthy
-	Attempts int       // consecutive failed runs
-	Since    time.Time // when Status last changed
-	LastLog  []string  // ring of the last 50 output lines (stdout+stderr)
+	Spec     core.TunnelSpec `json:"spec"`
+	Status   Status          `json:"status"`
+	Err      string          `json:"err,omitempty"`      // last failure reason; empty while healthy
+	Attempts int             `json:"attempts,omitempty"` // consecutive failed runs
+	Since    time.Time       `json:"since"`              // when Status last changed
+	LastLog  []string        `json:"lastLog,omitempty"`  // ring of the last 50 output lines (stdout+stderr)
+	// Rev orders snapshots: every emitted change of any session in a Manager
+	// gets the next value of a Manager-wide counter.
+	Rev uint64 `json:"rev"`
 }
 
 // Event reports a session change. Session is a snapshot owned by the receiver.
 type Event struct {
-	Key     string
-	Session Session
+	Key     string  `json:"key"`
+	Session Session `json:"session"`
 }
+
+// Controller drives tunnel sessions. It is implemented by *Manager (in
+// process) and by the agent client (sessions owned by a background agent).
+type Controller interface {
+	Start(spec core.TunnelSpec) error
+	Stop(key string) error
+	StopAll() error
+	Restart(key string) error
+	RestartAuthExpired() ([]string, error)
+	// Sessions returns snapshots sorted by Label (then Key). It never blocks
+	// on the network.
+	Sessions() []Session
+	Get(key string) (Session, bool)
+	Events() <-chan Event
+	ActiveCount() int
+}
+
+var _ Controller = (*Manager)(nil)
 
 // Options configures a Manager.
 type Options struct {
@@ -95,6 +116,7 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*entry
+	rev      uint64 // last Rev handed out
 }
 
 type entry struct {
@@ -192,7 +214,7 @@ func (m *Manager) Start(spec core.TunnelSpec) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e, ok := m.sessions[spec.Key]; ok && isActive(e.sess.Status) {
+	if e, ok := m.sessions[spec.Key]; ok && IsActive(e.sess.Status) {
 		return fmt.Errorf("start tunnel %q: already %s", spec.Key, e.sess.Status)
 	}
 	m.launchLocked(spec)
@@ -200,18 +222,20 @@ func (m *Manager) Start(spec core.TunnelSpec) error {
 }
 
 // Stop gracefully stops the session and removes it. Unknown keys are ignored.
-func (m *Manager) Stop(key string) {
+// The error is always nil; it exists to satisfy Controller.
+func (m *Manager) Stop(key string) error {
 	m.mu.Lock()
 	e, ok := m.sessions[key]
 	m.mu.Unlock()
 	if ok {
 		m.stopEntries([]*entry{e})
 	}
+	return nil
 }
 
 // StopAll gracefully stops every session concurrently: interrupt (terminate
-// on Windows), wait, kill after 3s.
-func (m *Manager) StopAll() {
+// on Windows), wait, kill after 3s. The error is always nil.
+func (m *Manager) StopAll() error {
 	m.mu.Lock()
 	entries := make([]*entry, 0, len(m.sessions))
 	for _, e := range m.sessions {
@@ -219,6 +243,7 @@ func (m *Manager) StopAll() {
 	}
 	m.mu.Unlock()
 	m.stopEntries(entries)
+	return nil
 }
 
 func (m *Manager) stopEntries(entries []*entry) {
@@ -253,7 +278,7 @@ func (m *Manager) Restart(key string) error {
 	<-e.done
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.sessions[key]; ok && cur != e && isActive(cur.sess.Status) {
+	if cur, ok := m.sessions[key]; ok && cur != e && IsActive(cur.sess.Status) {
 		return fmt.Errorf("restart tunnel %q: already %s", key, cur.sess.Status)
 	}
 	m.launchLocked(e.spec)
@@ -261,8 +286,8 @@ func (m *Manager) Restart(key string) error {
 }
 
 // RestartAuthExpired restarts every AuthExpired session (after re-login) and
-// returns the restarted keys.
-func (m *Manager) RestartAuthExpired() []string {
+// returns the restarted keys. The error is always nil.
+func (m *Manager) RestartAuthExpired() ([]string, error) {
 	m.mu.Lock()
 	var keys []string
 	for k, e := range m.sessions {
@@ -278,24 +303,44 @@ func (m *Manager) RestartAuthExpired() []string {
 			restarted = append(restarted, k)
 		}
 	}
-	return restarted
+	return restarted, nil
 }
 
 // Sessions returns snapshots of all sessions sorted by Label (then Key).
 func (m *Manager) Sessions() []Session {
+	s, _ := m.Snapshot()
+	return s
+}
+
+// Snapshot returns Sessions together with the Rev of the latest emitted
+// change: every change with a higher Rev happened after the snapshot.
+func (m *Manager) Snapshot() ([]Session, uint64) {
 	m.mu.Lock()
 	out := make([]Session, 0, len(m.sessions))
 	for _, e := range m.sessions {
 		out = append(out, snapshot(e))
 	}
+	rev := m.rev
 	m.mu.Unlock()
-	slices.SortFunc(out, func(a, b Session) int {
+	SortSessions(out)
+	return out, rev
+}
+
+// Rev returns the Rev of the latest emitted change.
+func (m *Manager) Rev() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rev
+}
+
+// SortSessions orders sessions by Label, then Key.
+func SortSessions(s []Session) {
+	slices.SortFunc(s, func(a, b Session) int {
 		if c := strings.Compare(a.Spec.Label, b.Spec.Label); c != 0 {
 			return c
 		}
 		return strings.Compare(a.Spec.Key, b.Spec.Key)
 	})
-	return out
 }
 
 // Get returns a snapshot of the session with key.
@@ -319,14 +364,15 @@ func (m *Manager) ActiveCount() int {
 	defer m.mu.Unlock()
 	n := 0
 	for _, e := range m.sessions {
-		if isActive(e.sess.Status) {
+		if IsActive(e.sess.Status) {
 			n++
 		}
 	}
 	return n
 }
 
-func isActive(s Status) bool {
+// IsActive reports whether s is Starting, Up or Reconnecting.
+func IsActive(s Status) bool {
 	return s == Starting || s == Up || s == Reconnecting
 }
 
@@ -356,9 +402,12 @@ func (m *Manager) setStatusLocked(e *entry, s Status) {
 	}
 }
 
-// emitLocked sends a snapshot without blocking, dropping the oldest queued
-// event when the buffer is full. Callers hold m.mu, which keeps events ordered.
+// emitLocked stamps the next Rev on e and sends a snapshot without blocking,
+// dropping the oldest queued event when the buffer is full. Callers hold m.mu,
+// which keeps events ordered.
 func (m *Manager) emitLocked(e *entry) {
+	m.rev++
+	e.sess.Rev = m.rev
 	ev := Event{Key: e.spec.Key, Session: snapshot(e)}
 	for {
 		select {

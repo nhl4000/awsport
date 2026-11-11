@@ -30,6 +30,7 @@ func Execute(version, commit string) int {
 // NewRootCmd builds the command tree. Without a subcommand awsport starts the
 // TUI, which handles prerequisite checks and onboarding itself.
 func NewRootCmd(version, commit string) *cobra.Command {
+	app.Version = version
 	root := &cobra.Command{
 		Use:   "awsport",
 		Short: "SSM port-forward tunnels and shells with stable local ports",
@@ -55,9 +56,12 @@ func NewRootCmd(version, commit string) *cobra.Command {
 		newLoginCmd(),
 		newLsCmd(),
 		newUpCmd(),
+		newPsCmd(),
+		newDownCmd(),
 		newGroupsCmd(),
 		newUpdateCmd(version),
 		newVersionCmd(version, commit),
+		newAgentCmd(version),
 	)
 	return root
 }

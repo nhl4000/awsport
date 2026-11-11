@@ -57,8 +57,22 @@ Sleep 500ms
 Type "t"
 Sleep 3s
 
-# Quit: confirm stops all tunnels.
+# Quit and keep the tunnels running in the background agent.
 Type "q"
+Sleep 1.8s
+Type "k"
 Sleep 1.2s
-Type "y"
+
+# Reopen: the tunnels are still there.
+Type "awsport"
+Sleep 300ms
+Enter
+Sleep 2s
+Type "t"
+Sleep 2.5s
+
+# Quit and stop everything.
+Type "q"
 Sleep 1.5s
+Type "s"
+Sleep 2s
