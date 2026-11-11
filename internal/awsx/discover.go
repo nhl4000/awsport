@@ -1,0 +1,397 @@
+package awsx
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+
+	"github.com/nhl4000/awsport/internal/core"
+)
+
+// Unreachable reasons reported on resources.
+const (
+	reasonSSMOffline = "SSM agent not online (missing agent or instance profile)"
+	reasonNoEndpoint = "RDS endpoint not available"
+)
+
+// stsFallbackRegion is used for the caller-identity check when a profile has
+// no region configured.
+const stsFallbackRegion = "us-east-1"
+
+// Discoverer lists AWS resources per profile. It caches one aws.Config per
+// profile (shared credential cache) and derives per-region copies from it.
+type Discoverer struct {
+	mu   sync.Mutex
+	cfgs map[string]aws.Config
+	load func(ctx context.Context, profile string) (aws.Config, error)
+}
+
+// NewDiscoverer returns a Discoverer that loads profiles from the shared AWS
+// config/credentials files.
+func NewDiscoverer() *Discoverer {
+	return &Discoverer{
+		cfgs: map[string]aws.Config{},
+		load: func(ctx context.Context, profile string) (aws.Config, error) {
+			return awsconfig.LoadDefaultConfig(ctx, awsconfig.WithSharedConfigProfile(profile))
+		},
+	}
+}
+
+// regionConfig returns the cached config of profile with Region set.
+func (d *Discoverer) regionConfig(ctx context.Context, profile, region string) (aws.Config, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	base, ok := d.cfgs[profile]
+	if !ok {
+		var err error
+		base, err = d.load(ctx, profile)
+		if err != nil {
+			return aws.Config{}, fmt.Errorf("load AWS config for profile %s: %w", profile, err)
+		}
+		d.cfgs[profile] = base
+	}
+	cfg := base.Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	return cfg, nil
+}
+
+// forget drops the cached config of profile so the next call re-reads
+// credentials (after a re-login).
+func (d *Discoverer) forget(profile string) {
+	d.mu.Lock()
+	delete(d.cfgs, profile)
+	d.mu.Unlock()
+}
+
+// authWrap wraps auth failures with ErrCredentials and drops the cached config.
+func (d *Discoverer) authWrap(profile string, err error) error {
+	if err == nil || !IsAuthError(err) {
+		return err
+	}
+	d.forget(profile)
+	if errors.Is(err, ErrCredentials) {
+		return err
+	}
+	return fmt.Errorf("%w: profile %s: %w", ErrCredentials, profile, err)
+}
+
+// Regions returns the regions to scan for a profile: p.Region followed by
+// extra, deduplicated with order preserved and empty entries dropped.
+func Regions(p core.Profile, extra []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range append([]string{p.Region}, extra...) {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// CheckCredentials verifies the profile's credentials with
+// sts:GetCallerIdentity. Auth failures are wrapped with ErrCredentials.
+func (d *Discoverer) CheckCredentials(ctx context.Context, p core.Profile) error {
+	cfg, err := d.regionConfig(ctx, p.Name, p.Region)
+	if err != nil {
+		return d.authWrap(p.Name, err)
+	}
+	if cfg.Region == "" {
+		cfg.Region = stsFallbackRegion
+	}
+	if _, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+		if IsAuthError(err) {
+			return d.authWrap(p.Name, err)
+		}
+		return fmt.Errorf("check credentials for profile %s: %w", p.Name, err)
+	}
+	return nil
+}
+
+// discoverOptions carries the per-call inputs of resource conversion.
+type discoverOptions struct {
+	profile      string
+	region       string
+	presets      []core.PortSpec
+	shellDefault string
+	manual       func(profile, region, name string) []core.PortSpec
+}
+
+// rdsAPI is the subset of the RDS client used for discovery.
+type rdsAPI interface {
+	rds.DescribeDBInstancesAPIClient
+	rds.DescribeDBClustersAPIClient
+}
+
+// regionClients are the per-region AWS APIs discovery needs; tests use fakes.
+type regionClients struct {
+	ec2 ec2.DescribeInstancesAPIClient
+	ssm ssm.DescribeInstanceInformationAPIClient
+	rds rdsAPI
+}
+
+func newRegionClients(cfg aws.Config) regionClients {
+	return regionClients{
+		ec2: ec2.NewFromConfig(cfg),
+		ssm: ssm.NewFromConfig(cfg),
+		rds: rds.NewFromConfig(cfg),
+	}
+}
+
+// Discover lists EC2 instances (excluding terminated, with SSM ping status,
+// Name tag and awsport:* tags) and RDS DB instances + clusters (writer
+// endpoint) in parallel across regions. Per-region errors are aggregated and
+// returned alongside whatever was found; auth errors are wrapped with
+// ErrCredentials.
+func (d *Discoverer) Discover(ctx context.Context, p core.Profile, regions []string, presets []core.PortSpec,
+	shellDefault string, manual func(profile, region, name string) []core.PortSpec) ([]core.Resource, error) {
+	if len(regions) == 0 {
+		return nil, fmt.Errorf("no regions to scan for profile %s: set a region on the profile or add regions to the awsport config", p.Name)
+	}
+	results := make([][]core.Resource, len(regions))
+	errs := make([]error, len(regions))
+	var wg sync.WaitGroup
+	for i, region := range regions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cfg, err := d.regionConfig(ctx, p.Name, region)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i], errs[i] = discoverRegion(ctx, newRegionClients(cfg), discoverOptions{
+				profile:      p.Name,
+				region:       region,
+				presets:      presets,
+				shellDefault: shellDefault,
+				manual:       manual,
+			})
+		}()
+	}
+	wg.Wait()
+
+	var out []core.Resource
+	for _, rs := range results {
+		out = append(out, rs...)
+	}
+	return out, d.authWrap(p.Name, errors.Join(errs...))
+}
+
+// discoverRegion lists EC2 and RDS resources of one region concurrently.
+func discoverRegion(ctx context.Context, c regionClients, o discoverOptions) ([]core.Resource, error) {
+	var (
+		wg             sync.WaitGroup
+		ec2Res, rdsRes []core.Resource
+		ec2Err, rdsErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ec2Res, ec2Err = discoverEC2(ctx, c, o)
+	}()
+	go func() {
+		defer wg.Done()
+		rdsRes, rdsErr = discoverRDS(ctx, c.rds, o)
+	}()
+	wg.Wait()
+
+	var errs []error
+	if ec2Err != nil {
+		errs = append(errs, fmt.Errorf("%s: ec2: %w", o.region, ec2Err))
+	}
+	if rdsErr != nil {
+		errs = append(errs, fmt.Errorf("%s: rds: %w", o.region, rdsErr))
+	}
+	out := append(ec2Res, rdsRes...)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Kind != b.Kind {
+			return a.Kind == core.KindEC2
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		return a.ID < b.ID
+	})
+	return out, errors.Join(errs...)
+}
+
+func discoverEC2(ctx context.Context, c regionClients, o discoverOptions) ([]core.Resource, error) {
+	var instances []ec2types.Instance
+	pager := ec2.NewDescribeInstancesPaginator(c.ec2, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{{
+			Name:   aws.String("instance-state-name"),
+			Values: []string{"pending", "running", "shutting-down", "stopping", "stopped"},
+		}},
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe instances: %w", err)
+		}
+		for _, res := range page.Reservations {
+			for _, inst := range res.Instances {
+				if inst.State != nil && inst.State.Name == ec2types.InstanceStateNameTerminated {
+					continue
+				}
+				instances = append(instances, inst)
+			}
+		}
+	}
+	if len(instances) == 0 {
+		return nil, nil
+	}
+
+	online, err := ssmOnline(ctx, c.ssm)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Resource, 0, len(instances))
+	for _, inst := range instances {
+		out = append(out, ec2Resource(inst, online, o))
+	}
+	return out, nil
+}
+
+// ssmOnline returns the IDs of managed instances whose SSM ping status is Online.
+func ssmOnline(ctx context.Context, api ssm.DescribeInstanceInformationAPIClient) (map[string]bool, error) {
+	online := map[string]bool{}
+	pager := ssm.NewDescribeInstanceInformationPaginator(api, &ssm.DescribeInstanceInformationInput{
+		Filters: []ssmtypes.InstanceInformationStringFilter{{
+			Key:    aws.String("PingStatus"),
+			Values: []string{string(ssmtypes.PingStatusOnline)},
+		}},
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe SSM instance information: %w", err)
+		}
+		for _, info := range page.InstanceInformationList {
+			if info.PingStatus == ssmtypes.PingStatusOnline {
+				online[aws.ToString(info.InstanceId)] = true
+			}
+		}
+	}
+	return online, nil
+}
+
+func ec2Resource(inst ec2types.Instance, online map[string]bool, o discoverOptions) core.Resource {
+	tags := map[string]string{}
+	for _, t := range inst.Tags {
+		tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	id := aws.ToString(inst.InstanceId)
+	name := strings.TrimSpace(tags["Name"])
+	if name == "" {
+		name = id
+	}
+	state := ""
+	if inst.State != nil {
+		state = string(inst.State.Name)
+	}
+	shell := strings.TrimSpace(tags[core.TagShell])
+	if shell == "" {
+		shell = o.shellDefault
+	}
+	if shell == "" {
+		shell = core.DefaultShellCommand
+	}
+	var manual []core.PortSpec
+	if o.manual != nil {
+		manual = o.manual(o.profile, o.region, name)
+	}
+
+	r := core.Resource{
+		Kind:         core.KindEC2,
+		Profile:      o.profile,
+		Region:       o.region,
+		ID:           id,
+		Name:         name,
+		State:        state,
+		SSMOnline:    online[id],
+		IsBastion:    strings.EqualFold(strings.TrimSpace(tags[core.TagBastion]), "true"),
+		Ports:        mergePorts(o.presets, parsePortsTag(tags[core.TagPorts]), manual),
+		ShellCommand: shell,
+	}
+	switch {
+	case state != string(ec2types.InstanceStateNameRunning):
+		r.Unreachable = "instance " + state
+	case !r.SSMOnline:
+		r.Unreachable = reasonSSMOffline
+	}
+	return r
+}
+
+func discoverRDS(ctx context.Context, api rdsAPI, o discoverOptions) ([]core.Resource, error) {
+	var out []core.Resource
+	instPager := rds.NewDescribeDBInstancesPaginator(api, &rds.DescribeDBInstancesInput{})
+	for instPager.HasMorePages() {
+		page, err := instPager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe DB instances: %w", err)
+		}
+		for _, db := range page.DBInstances {
+			if aws.ToString(db.DBClusterIdentifier) != "" {
+				continue // reached through the cluster's writer endpoint
+			}
+			var host string
+			var port int32
+			if db.Endpoint != nil {
+				host, port = aws.ToString(db.Endpoint.Address), aws.ToInt32(db.Endpoint.Port)
+			}
+			out = append(out, rdsResource(o, aws.ToString(db.DBInstanceIdentifier),
+				aws.ToString(db.DBInstanceStatus), host, port, aws.ToString(db.Engine)))
+		}
+	}
+	clusterPager := rds.NewDescribeDBClustersPaginator(api, &rds.DescribeDBClustersInput{})
+	for clusterPager.HasMorePages() {
+		page, err := clusterPager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe DB clusters: %w", err)
+		}
+		for _, cl := range page.DBClusters {
+			out = append(out, rdsResource(o, aws.ToString(cl.DBClusterIdentifier),
+				aws.ToString(cl.Status), aws.ToString(cl.Endpoint), aws.ToInt32(cl.Port), aws.ToString(cl.Engine)))
+		}
+	}
+	return out, nil
+}
+
+func rdsResource(o discoverOptions, id, status, host string, port int32, engine string) core.Resource {
+	r := core.Resource{
+		Kind:    core.KindRDS,
+		Profile: o.profile,
+		Region:  o.region,
+		ID:      id,
+		Name:    id,
+		State:   status,
+		Host:    host,
+		Port:    int(port),
+		Engine:  engine,
+	}
+	switch {
+	case status != "available":
+		r.Unreachable = "RDS status " + status
+	case host == "" || port == 0:
+		r.Unreachable = reasonNoEndpoint
+	}
+	return r
+}

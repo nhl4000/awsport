@@ -1,0 +1,7 @@
+/dist/
+/awsport
+/awsport.exe
+*.test
+*.out
+coverage.*
+.DS_Store

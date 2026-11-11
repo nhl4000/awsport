@@ -1,0 +1,54 @@
+# Example team config for awsport. Host it somewhere your team can reach
+# (a repo, an internal URL) and import it with:
+#
+#   awsport init --from https://example.com/awsport.team.yaml
+#
+# Every value below is a placeholder. Settings in your personal config.yaml
+# override these; groups and presets merge by name/remote port.
+
+sso:
+  # IAM Identity Center (SSO) portal and its region.
+  start_url: https://d-0000000000.awsapps.com/start
+  region: us-east-1
+  # Name of the [sso-session] awsport writes into ~/.aws/config.
+  session: awsport
+
+# Regions scanned in addition to each profile's own region.
+regions:
+  - us-east-1
+  - us-west-2
+
+# Ports offered for every EC2 instance (in addition to awsport:ports tags).
+presets:
+  - name: mailpit
+    remote: 8025
+  - name: http
+    remote: 80
+  - name: app
+    remote: 8080
+
+# Command run when opening an interactive shell (awsport:shell tag wins).
+shell_command: sudo su - ubuntu
+
+# Reconnect dropped tunnels, giving up after this many consecutive failures.
+reconnect: true
+max_failures: 5
+
+# Tunnel bundles started together: `awsport up example-dev-stack`.
+# Profiles are named <account-name>-<role-name> by `awsport login`.
+groups:
+  - name: example-dev-stack
+    members:
+      - profile: example-dev-developer
+        kind: ec2
+        name: example-app
+        remote: 8080
+      - profile: example-dev-developer
+        kind: ec2
+        name: example-app
+        remote: 8025
+      - profile: example-dev-developer
+        kind: rds
+        name: example-db
+        region: us-east-1
+        remote: 5432
