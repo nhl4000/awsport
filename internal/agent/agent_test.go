@@ -510,8 +510,10 @@ func TestOutdatedAgent(t *testing.T) {
 		if err := c.Start(testSpec("a")); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		if !old.exited() {
-			t.Fatal("outdated agent still running")
+		// The old agent closes its socket before Serve returns, so its exit
+		// can trail the client's switch to the fresh agent.
+		if err := old.wait(t); err != nil {
+			t.Fatalf("outdated agent Serve: %v", err)
 		}
 		mu.Lock()
 		defer mu.Unlock()
