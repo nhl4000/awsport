@@ -14,12 +14,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
-        variant: [v5, v7, nocache, toolcache, preinstalled, ddrive]
-        exclude:
-          - os: ubuntu-latest
+        variant: [v7, toolcache, manual]
+        include:
+          - os: windows-latest
             variant: ddrive
-          - os: macos-latest
-            variant: ddrive
+          - os: windows-latest
+            variant: nodefender
+          - os: windows-latest
+            variant: nodefender-toolcache
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} ${{ matrix.variant }}
     defaults:
@@ -27,38 +29,47 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: preinstalled go
-        run: |
-          which go || true
-          GOTOOLCHAIN=local go version || true
-          ls "$RUNNER_TOOL_CACHE/go" || true
-          df -h || true
+      - if: startsWith(matrix.variant, 'nodefender')
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
       - if: matrix.variant == 'ddrive'
         run: |
           echo "GOCACHE=D:\\gocache" >> "$GITHUB_ENV"
           echo "GOMODCACHE=D:\\gomodcache" >> "$GITHUB_ENV"
-      - if: matrix.variant == 'toolcache'
+      - if: endsWith(matrix.variant, 'toolcache')
         uses: actions/cache@v6
         with:
           path: ${{ runner.tool_cache }}/go/1.27.4
           key: exp-toolchain-${{ runner.os }}-${{ runner.arch }}-go1.27.4
-      - if: matrix.variant == 'v5'
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - if: matrix.variant == 'v7' || matrix.variant == 'toolcache' || matrix.variant == 'ddrive'
+      - if: matrix.variant != 'manual'
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - if: matrix.variant == 'nocache'
-        uses: actions/setup-go@v7
+      - name: manual install
+        if: matrix.variant == 'manual'
+        run: |
+          set -x
+          os=$(echo "$RUNNER_OS" | tr A-Z a-z); [ "$os" = macos ] && os=darwin
+          arch=$(echo "$RUNNER_ARCH" | tr A-Z a-z); [ "$arch" = x64 ] && arch=amd64
+          cd "$RUNNER_TEMP"
+          if [ "$os" = windows ]; then
+            time curl -fsSLo go.zip "https://go.dev/dl/go1.27.4.$os-$arch.zip"
+            time 7z x -bd -y go.zip >/dev/null
+          else
+            time curl -fsSL "https://go.dev/dl/go1.27.4.$os-$arch.tar.gz" | tar xz
+          fi
+          echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+      - if: matrix.variant == 'manual'
+        uses: actions/cache@v6
         with:
-          go-version-file: go.mod
-          cache: false
-      - name: toolchain switch (preinstalled)
-        if: matrix.variant == 'preinstalled'
-        run: time go version
+          path: |
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~/AppData/Local/go-build
+            ~/go/pkg/mod
+          key: exp-manual-${{ runner.os }}-${{ hashFiles('go.sum') }}
+      - run: go version
       - run: time go vet ./...
       - run: time go test ./...
-      - run: du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
