@@ -1,0 +1,64 @@
+name: exp
+
+on:
+  push:
+    branches:
+      - ci-speed
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        variant: [v5, v7, nocache, toolcache, preinstalled, ddrive]
+        exclude:
+          - os: ubuntu-latest
+            variant: ddrive
+          - os: macos-latest
+            variant: ddrive
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} ${{ matrix.variant }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: preinstalled go
+        run: |
+          which go || true
+          GOTOOLCHAIN=local go version || true
+          ls "$RUNNER_TOOL_CACHE/go" || true
+          df -h || true
+      - if: matrix.variant == 'ddrive'
+        run: |
+          echo "GOCACHE=D:\\gocache" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=D:\\gomodcache" >> "$GITHUB_ENV"
+      - if: matrix.variant == 'toolcache'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.tool_cache }}/go/1.27.4
+          key: exp-toolchain-${{ runner.os }}-${{ runner.arch }}-go1.27.4
+      - if: matrix.variant == 'v5'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - if: matrix.variant == 'v7' || matrix.variant == 'toolcache' || matrix.variant == 'ddrive'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - if: matrix.variant == 'nocache'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: toolchain switch (preinstalled)
+        if: matrix.variant == 'preinstalled'
+        run: time go version
+      - run: time go vet ./...
+      - run: time go test ./...
+      - run: du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
