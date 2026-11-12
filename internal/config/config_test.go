@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/ghfetch"
 )
 
 func setDirs(t *testing.T) string {
@@ -353,5 +354,113 @@ func TestImportTeamFromHTTP(t *testing.T) {
 				t.Fatalf("effective = %+v", eff)
 			}
 		})
+	}
+}
+
+// useGitHub points GitHub imports at srv with no ambient credentials.
+func useGitHub(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	old := gitHub
+	gitHub = &ghfetch.Client{BaseURL: srv.URL, GHToken: func(context.Context) string { return "" }}
+	t.Cleanup(func() { gitHub = old })
+}
+
+func TestImportTeamFromGitHub(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      string
+		wantPath string
+		wantRef  string
+	}{
+		{"short form", "github:acme/platform/deploy/awsport.team.yaml@main", "/repos/acme/platform/contents/deploy/awsport.team.yaml", "main"},
+		{"short form default branch", "github:acme/platform/awsport.team.yaml", "/repos/acme/platform/contents/awsport.team.yaml", ""},
+		{"web URL", "https://github.com/acme/platform/blob/v1/awsport.team.yaml", "/repos/acme/platform/contents/awsport.team.yaml", "v1"},
+		{"raw URL", "https://raw.githubusercontent.com/acme/platform/main/awsport.team.yaml", "/repos/acme/platform/contents/awsport.team.yaml", "main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setDirs(t)
+			var gotPath, gotRef, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotRef, gotAuth = r.URL.Path, r.URL.Query().Get("ref"), r.Header.Get("Authorization")
+				_, _ = w.Write([]byte(teamYAML))
+			}))
+			defer srv.Close()
+			useGitHub(t, srv)
+			t.Setenv("GH_TOKEN", "t-gh")
+
+			team, err := ImportTeam(context.Background(), "  "+tt.src+"\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotPath != tt.wantPath || gotRef != tt.wantRef || gotAuth != "Bearer t-gh" {
+				t.Fatalf("request path=%q ref=%q auth=%q", gotPath, gotRef, gotAuth)
+			}
+			if len(team.Groups) != 2 {
+				t.Fatalf("team = %+v", team)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "team.yaml"))
+			if err != nil || string(got) != teamYAML {
+				t.Fatalf("team.yaml = %q, %v", got, err)
+			}
+			user, err := LoadUser()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if user.TeamSource != tt.src {
+				t.Fatalf("TeamSource = %q, want %q", user.TeamSource, tt.src)
+			}
+		})
+	}
+}
+
+func TestImportTeamFromGitHubErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		src    string
+		status int
+		body   string
+		want   string
+	}{
+		{"not found", "github:acme/platform/missing.yaml@main", http.StatusNotFound, `{"message":"Not Found"}`,
+			"import team config: can't read acme/platform/missing.yaml@main: the file is missing or acme/platform is private"},
+		{"invalid YAML", "github:acme/platform/a.yaml", http.StatusOK, "sso:\n  start_url: x\nextra: true\n",
+			"import team config from github:acme/platform/a.yaml: invalid awsport config YAML"},
+		{"too large", "github:acme/platform/a.yaml", http.StatusOK, strings.Repeat("#", maxTeamConfigSize+1),
+			"can't read acme/platform/a.yaml: read: exceeds"},
+		{"malformed source", "github:acme/platform", http.StatusOK, teamYAML, "invalid GitHub source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setDirs(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			useGitHub(t, srv)
+
+			_, err := ImportTeam(context.Background(), tt.src)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+			if _, serr := os.Stat(filepath.Join(dir, "team.yaml")); serr == nil {
+				t.Fatal("team.yaml written despite error")
+			}
+		})
+	}
+}
+
+func TestLoadTeam(t *testing.T) {
+	dir := setDirs(t)
+	if team, err := LoadTeam(); err != nil || team != nil {
+		t.Fatalf("missing team.yaml: %+v, %v", team, err)
+	}
+	writeFile(t, filepath.Join(dir, "team.yaml"), teamYAML)
+	team, err := LoadTeam()
+	if err != nil || len(team.Regions) != 2 {
+		t.Fatalf("LoadTeam = %+v, %v", team, err)
 	}
 }

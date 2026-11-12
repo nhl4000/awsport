@@ -79,14 +79,35 @@ Update later with `awsport update`.
 
 ## Getting started
 
+### For a team: three commands
+
+Keep an `awsport.team.yaml` (SSO portal, regions, presets, tunnel groups —
+see [Team config](#team-config)) in a repo your team can read, even a private
+one. Each teammate then runs:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nhl4000/awsport/main/install.sh | sh
+awsport init --from github:your-org/your-repo/awsport.team.yaml
+awsport login
+```
+
+`github:OWNER/REPO/PATH[@REF]` (or a `github.com/.../blob/...` URL) is read
+through the GitHub API with your existing login — `GITHUB_TOKEN`, `GH_TOKEN`,
+or the [GitHub CLI](https://cli.github.com/)'s `gh auth token` — so private
+repos work. Pull later changes with `awsport init --refresh`.
+
+Something not working? Run [`awsport doctor`](#troubleshooting).
+
+### Step by step
+
 Run `awsport`. On first start it walks you through onboarding:
 
 1. **Prerequisites** — AWS CLI v2 (2.9 or newer) and `session-manager-plugin`. Missing tools
    come with the official install commands for your OS, which awsport can run
    for you.
 2. **SSO setup**, one of:
-   - import a team config (`awsport init --from <url|path>`), which usually
-     contains the SSO start URL and region;
+   - import a team config (`awsport init --from <github:…|url|path>`), which
+     usually contains the SSO start URL and region;
    - reuse an existing `[sso-session]` already in `~/.aws/config`;
    - enter the start URL (e.g. `https://d-0000000000.awsapps.com/start`) and region.
 3. **Login** — awsport runs `aws sso login`, shows the sign-in link and code,
@@ -118,6 +139,28 @@ awsport init --start-url https://d-0000000000.awsapps.com/start --region us-east
 awsport login
 awsport ls
 ```
+
+## Troubleshooting
+
+`awsport doctor` checks everything awsport depends on and prints a fix for
+each problem:
+
+```
+Tools
+  ✓ AWS CLI 2.22.0
+  ✗ session-manager-plugin not found
+    → fix: curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" …
+Profiles
+  ⚠ acme-staging-developer: can't list RDS databases in us-east-1 — missing rds:DescribeDBInstances
+    → fix: Ask your AWS admin to allow rds:DescribeDBInstances in the "Developer" permission set …
+```
+
+It covers the AWS CLI and plugin versions, `~/.aws` permissions (including
+WSL setups where it lives on a Windows drive), SSO configuration and token
+expiry, whether a browser can be opened, credentials and IAM permissions for
+each profile, and the background agent. `awsport doctor --report doctor.md`
+writes the same results with account IDs, emails, keys and home paths
+redacted — send that file to whoever helps you.
 
 ## Tag conventions
 
@@ -179,7 +222,7 @@ WezTerm, kitty…); `o` opens it in your browser and `c` copies the address.
 | File                                    | Written by      | Contents                                   |
 | --------------------------------------- | --------------- | ------------------------------------------ |
 | `~/.config/awsport/config.yaml`         | you / `init`    | personal settings (override the team file) |
-| `~/.config/awsport/team.yaml`           | `init --from`   | imported team config                       |
+| `~/.config/awsport/team.yaml`           | `init --from` / `init --refresh` | imported team config      |
 | `~/.local/state/awsport/state.json`     | awsport         | saved ports, bastions, manual ports, groups |
 
 On macOS and Windows both live under the OS config directory
@@ -210,8 +253,9 @@ groups:
       - { profile: example-dev-developer, kind: rds, name: example-db, region: us-east-1, remote: 5432 }
 ```
 
-Import it with `awsport init --from https://example.com/awsport.team.yaml`
-(or a file path). Your own `config.yaml` wins over the team file; presets and
+Import it with `awsport init --from github:your-org/your-repo/awsport.team.yaml`
+(private repos work through your GitHub login), an `https://` URL, or a file
+path; `awsport init --refresh` pulls changes later. Your own `config.yaml` wins over the team file; presets and
 groups are merged by remote port / name.
 
 Group members match resources by kind + name (EC2 `Name` tag or RDS
@@ -222,9 +266,10 @@ identifier) and, if set, region — so groups survive instance replacement.
 | Command                                         | Description                                                                 |
 | ----------------------------------------------- | --------------------------------------------------------------------------- |
 | `awsport`                                       | start the TUI (onboarding on first run)                                     |
-| `awsport init --from <url\|path>`               | import a team config                                                        |
+| `awsport init --from <github:owner/repo/path[@ref]\|url\|path>` | import a team config (private GitHub repos via your `gh` login or `GITHUB_TOKEN`) |
+| `awsport init --refresh`                        | re-import the team config from where it was last imported                    |
 | `awsport init --start-url <url> --region <r> [--session <name>]` | configure SSO                                              |
-| `awsport init`                                  | adopt the first `[sso-session]` from `~/.aws/config`                        |
+| `awsport init`                                  | re-import the team config if one was imported, else adopt the first `[sso-session]` from `~/.aws/config` |
 | `awsport login`                                 | SSO login, then sync profiles into `~/.aws/config`                          |
 | `awsport login <profile>`                       | `aws sso login --profile <profile>`                                         |
 | `awsport ls [profile] [--all] [--json]`         | list EC2/RDS resources (all profiles when none given)                       |
@@ -232,6 +277,7 @@ identifier) and, if set, region — so groups survive instance replacement.
 | `awsport ps [--json]`                           | list tunnels running in the background agent                                |
 | `awsport down [--all] [name\|group...]`         | stop background tunnels by label, key or group name                          |
 | `awsport groups`                                | list tunnel groups                                                          |
+| `awsport doctor [--profile P] [--report FILE] [--json]` | check tools, files, SSO, browser, profile permissions and the agent; prints a fix per problem |
 | `awsport update`                                | self-update from the latest GitHub release (checksum-verified)              |
 | `awsport version`                               | print version                                                               |
 

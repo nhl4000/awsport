@@ -436,17 +436,29 @@ func underAWSDir(p string) bool {
 }
 
 func cantWrite(p, goos string, wsl bool, resolved string) string {
+	where, fix := writeProblem(p, goos, wsl, resolved)
+	return fmt.Sprintf("awsport can't write %s: %s", where, fix)
+}
+
+// WriteProblem explains how to make p (under ~/.aws) writable, in the words
+// `awsport login` uses for that failure: where names p (and, on WSL, the
+// Windows drive it links to), fix is the action to take.
+func WriteProblem(p string) (where, fix string) {
+	return writeProblem(p, runtime.GOOS, deps.IsWSL(), resolvePath(p))
+}
+
+func writeProblem(p, goos string, wsl bool, resolved string) (where, fix string) {
 	switch {
 	case goos == "windows":
-		return fmt.Sprintf("awsport can't write %s: make sure your Windows user can write the .aws folder in your user profile", p)
+		return p, "make sure your Windows user can write the .aws folder in your user profile"
 	case wsl && (strings.HasPrefix(p, "/mnt/") || strings.HasPrefix(resolved, "/mnt/")):
 		where := p
 		if resolved != p {
 			where = fmt.Sprintf("%s (links to %s)", p, resolved)
 		}
-		return fmt.Sprintf("awsport can't write %s: it is on a Windows drive, which doesn't allow this from WSL; keep ~/.aws in your Linux home instead (a real directory, not a link to /mnt/…)", where)
+		return where, "it is on a Windows drive, which doesn't allow this from WSL; keep ~/.aws in your Linux home instead (a real directory, not a link to /mnt/…)"
 	}
-	return fmt.Sprintf("awsport can't write %s: fix ownership with: sudo chown -R $(whoami) ~/.aws", p)
+	return p, "fix ownership with: sudo chown -R $(whoami) ~/.aws"
 }
 
 // resolvePath follows symlinks in the longest existing prefix of p.

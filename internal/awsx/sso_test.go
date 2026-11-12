@@ -48,7 +48,7 @@ func TestCachedSSOToken(t *testing.T) {
 			for name, content := range tt.files {
 				writeFile(t, filepath.Join(dir, name), content)
 			}
-			got, err := cachedSSOToken(dir, url, now)
+			got, _, err := cachedSSOToken(dir, url, now)
 			if tt.want == "" {
 				if !errors.Is(err, ErrSSOTokenExpired) {
 					t.Fatalf("err = %v, want ErrSSOTokenExpired", err)

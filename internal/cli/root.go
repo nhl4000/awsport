@@ -56,6 +56,7 @@ func NewRootCmd(version, commit string) *cobra.Command {
 		newPsCmd(),
 		newDownCmd(),
 		newGroupsCmd(),
+		newDoctorCmd(version, commit),
 		newUpdateCmd(version),
 		newVersionCmd(version, commit),
 		newAgentCmd(version),

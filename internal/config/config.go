@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/ghfetch"
 )
 
 // DefaultSSOSession is the sso-session name used when SSO.Session is empty.
@@ -31,6 +32,9 @@ const maxTeamConfigSize = 1 << 20
 
 // teamFetchTimeout bounds fetching a team config over HTTP.
 const teamFetchTimeout = 15 * time.Second
+
+// gitHub fetches github: sources and GitHub web/raw URLs; replaced in tests.
+var gitHub = &ghfetch.Client{}
 
 // SSO holds IAM Identity Center settings.
 type SSO struct {
@@ -108,22 +112,44 @@ func SaveUser(c *Config) error {
 	return WriteFileAtomic(p, data)
 }
 
-// ImportTeam fetches a team config from an http(s) URL or reads it from a
-// file path, validates it strictly (unknown keys rejected), stores it as
-// team.yaml and records src as TeamSource in the user config.
+// LoadTeam returns only the imported team.yaml, or nil when none exists.
+func LoadTeam() (*Config, error) {
+	p, err := TeamConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	return readFile(p)
+}
+
+// ImportTeam fetches a team config, validates it strictly (unknown keys
+// rejected), stores it as team.yaml and records the source as TeamSource in
+// the user config. src is one of:
+//   - github:OWNER/REPO/PATH[@REF], or a github.com blob / raw.githubusercontent.com
+//     URL, fetched through the GitHub API with the user's token (private repos work);
+//   - any other http(s) URL;
+//   - a file path (recorded as an absolute path).
 func ImportTeam(ctx context.Context, src string) (*Config, error) {
 	src = strings.TrimSpace(src)
 	if src == "" {
 		return nil, errors.New("import team config: empty source")
 	}
+	gh, isGitHub, err := ghfetch.Parse(src)
+	if err != nil {
+		return nil, fmt.Errorf("import team config: %w", err)
+	}
 	var (
 		data   []byte
-		err    error
 		source = src
 	)
-	if isURL(src) {
+	switch {
+	case isGitHub:
+		// GitHub errors already name the file and the fix.
+		if data, err = fetchGitHub(ctx, gh); err != nil {
+			return nil, fmt.Errorf("import team config: %w", err)
+		}
+	case isURL(src):
 		data, err = fetch(ctx, src)
-	} else {
+	default:
 		if abs, aerr := filepath.Abs(src); aerr == nil {
 			source = abs
 		}
@@ -309,6 +335,21 @@ func fetch(ctx context.Context, src string) ([]byte, error) {
 		return nil, fmt.Errorf("fetch: unexpected status %s", resp.Status)
 	}
 	return readAllLimited(resp.Body)
+}
+
+func fetchGitHub(ctx context.Context, f ghfetch.File) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, teamFetchTimeout)
+	defer cancel()
+	body, err := gitHub.Open(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	data, err := readAllLimited(body)
+	if err != nil {
+		return nil, fmt.Errorf("can't read %s: %w", f, err)
+	}
+	return data, nil
 }
 
 func readLimited(path string) ([]byte, error) {

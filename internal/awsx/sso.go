@@ -41,7 +41,7 @@ func ListSSOAccess(ctx context.Context, sso config.SSO) ([]SSOProfile, error) {
 	if strings.TrimSpace(sso.StartURL) == "" || strings.TrimSpace(sso.Region) == "" {
 		return nil, errors.New("list SSO access: SSO start URL and region are required")
 	}
-	token, err := cachedSSOToken(ssoCacheDir(), sso.StartURL, time.Now())
+	token, _, err := cachedSSOToken(ssoCacheDir(), sso.StartURL, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +56,11 @@ func ListSSOAccess(ctx context.Context, sso config.SSO) ([]SSOProfile, error) {
 	return listSSOAccess(ctx, ssoapi.NewFromConfig(cfg), token, region)
 }
 
+// SSOCacheDir is the AWS CLI's SSO token cache (~/.aws/sso/cache).
+func SSOCacheDir() string {
+	return ssoCacheDir()
+}
+
 func ssoCacheDir() string {
 	return filepath.Join(homeDir(), ".aws", "sso", "cache")
 }
@@ -66,15 +71,26 @@ type cachedToken struct {
 	ExpiresAt   string `json:"expiresAt"`
 }
 
-// cachedSSOToken returns the longest-lived unexpired access token in dir
-// whose startUrl matches startURL.
-func cachedSSOToken(dir, startURL string, now time.Time) (string, error) {
+// SSOTokenExpiry returns the expiry of the longest-lived cached access token
+// in dir whose startUrl matches startURL, even when it has passed. The error
+// wraps ErrSSOTokenExpired when there is no such token or it is not valid for
+// at least another minute (the margin ListSSOAccess requires); the expiry is
+// zero when no token was found.
+func SSOTokenExpiry(dir, startURL string, now time.Time) (time.Time, error) {
+	_, exp, err := cachedSSOToken(dir, startURL, now)
+	return exp, err
+}
+
+// cachedSSOToken returns the longest-lived access token in dir whose startUrl
+// matches startURL and its expiry. The error wraps ErrSSOTokenExpired when
+// there is none or it expires within tokenSkew of now.
+func cachedSSOToken(dir, startURL string, now time.Time) (string, time.Time, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("%w: no SSO token cache at %s", ErrSSOTokenExpired, dir)
+		return "", time.Time{}, fmt.Errorf("%w: no SSO token cache at %s", ErrSSOTokenExpired, dir)
 	}
 	if err != nil {
-		return "", fmt.Errorf("read SSO token cache: %w", err)
+		return "", time.Time{}, fmt.Errorf("read SSO token cache: %w", err)
 	}
 	want := normalizeStartURL(startURL)
 	var best string
@@ -92,7 +108,7 @@ func cachedSSOToken(dir, startURL string, now time.Time) (string, error) {
 			continue
 		}
 		exp, ok := parseExpiry(t.ExpiresAt)
-		if !ok || !exp.After(now.Add(tokenSkew)) {
+		if !ok {
 			continue
 		}
 		if best == "" || exp.After(bestExp) {
@@ -100,9 +116,12 @@ func cachedSSOToken(dir, startURL string, now time.Time) (string, error) {
 		}
 	}
 	if best == "" {
-		return "", fmt.Errorf("%w for %s", ErrSSOTokenExpired, startURL)
+		return "", time.Time{}, fmt.Errorf("%w for %s", ErrSSOTokenExpired, startURL)
 	}
-	return best, nil
+	if !bestExp.After(now.Add(tokenSkew)) {
+		return "", bestExp, fmt.Errorf("%w for %s (valid until %s)", ErrSSOTokenExpired, startURL, bestExp.Format(time.RFC3339))
+	}
+	return best, bestExp, nil
 }
 
 func normalizeStartURL(u string) string {

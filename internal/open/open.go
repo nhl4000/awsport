@@ -42,8 +42,7 @@ var ErrNoDisplay = errors.New("no graphical display (DISPLAY is not set)")
 
 // Browser opens url in the default browser without waiting for it.
 func Browser(url string) error {
-	display := os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
-	l, err := browserCommand(runtime.GOOS, isWSL(), display, exec.LookPath, fileExists, wslMountRoot(), url)
+	l, err := defaultLauncher(url)
 	if err != nil {
 		return err
 	}
@@ -54,6 +53,29 @@ func Browser(url string) error {
 	}
 	go func() { _ = cmd.Wait() }() // reap; the launcher's exit status is irrelevant
 	return nil
+}
+
+// Check resolves the program Browser would start, without starting it, and
+// returns its name or path. Errors are those Browser returns before launching
+// (ErrNoDisplay, ErrNoWindowsInterop, unsupported OS).
+func Check() (string, error) {
+	l, err := defaultLauncher("")
+	if err != nil {
+		return "", err
+	}
+	if l.name == "xdg-open" {
+		p, err := exec.LookPath(l.name)
+		if err != nil {
+			return "", fmt.Errorf("xdg-open not found: %w", err)
+		}
+		return p, nil
+	}
+	return l.name, nil
+}
+
+func defaultLauncher(url string) (launcher, error) {
+	display := os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	return browserCommand(runtime.GOOS, isWSL(), display, exec.LookPath, fileExists, wslMountRoot(), url)
 }
 
 // ErrNoWindowsInterop means awsport runs under WSL but cannot reach a Windows

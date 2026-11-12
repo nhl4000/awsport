@@ -1,7 +1,7 @@
 # Example team config for awsport. Host it somewhere your team can reach
 # (a repo, an internal URL) and import it with:
 #
-#   awsport init --from https://example.com/awsport.team.yaml
+#   awsport init --from github:your-org/your-repo/awsport.team.yaml
 #
 # Every value below is a placeholder. Settings in your personal config.yaml
 # override these; groups and presets merge by name/remote port.
