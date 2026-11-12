@@ -1,0 +1,76 @@
+name: Set up Go
+description: >-
+  Install the Go release named by go.mod's `go` directive from go.dev
+  (SHA-256 checked) and point GOCACHE/GOMODCACHE at the runner's temp
+  directory. Caching is left to the calling job, through the `cache-path`
+  output.
+
+# Replaces actions/setup-go, which in this repo's CI spent most of its time
+# copying the unpacked toolchain into the runner tool cache (ubuntu 5s,
+# macOS 6-20s, Windows 8-13s): the whole setup-go step took 8-10s on ubuntu,
+# 12-35s on macOS and 25-43s on Windows. Unpacking go.dev's archive in place
+# takes 2-3s on ubuntu/macOS and 3s on Windows with its built-in bsdtar
+# (Git's unzip: 10s, 7-Zip: 9s, Expand-Archive: 23s). On Windows the runner
+# temp directory is on D:, where restoring the ~85 MB build cache takes 3s
+# instead of 11-21s on C: (setup-go's default GOCACHE under the user profile).
+
+outputs:
+  cache-path:
+    description: GOCACHE and GOMODCACHE, one per line, for actions/cache.
+    value: ${{ steps.install.outputs.cache-path }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=$(awk '$1 == "go" { print $2; exit }' go.mod)
+        [ -n "$version" ] || { echo "::error::no go directive in go.mod"; exit 1; }
+
+        case "$RUNNER_OS" in
+          Linux) os=linux ext=tar.gz ;;
+          macOS) os=darwin ext=tar.gz ;;
+          Windows) os=windows ext=zip ;;
+          *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner arch $RUNNER_ARCH"; exit 1 ;;
+        esac
+        file="go$version.$os-$arch.$ext"
+
+        cd "$RUNNER_TEMP"
+        want=$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json&include=all' |
+          jq -r --arg f "$file" 'first(.[].files[] | select(.filename == $f) | .sha256) // empty')
+        [ -n "$want" ] || { echo "::error::go.dev lists no $file"; exit 1; }
+        curl -fsSL --retry 3 -o "$file" "https://go.dev/dl/$file"
+        if command -v sha256sum >/dev/null; then
+          got=$(sha256sum "$file" | cut -d' ' -f1)
+        else
+          got=$(shasum -a 256 "$file" | cut -d' ' -f1)
+        fi
+        [ "$got" = "$want" ] || { echo "::error::$file: SHA-256 $got, go.dev publishes $want"; exit 1; }
+
+        if [ "$ext" = zip ]; then
+          "$(cygpath "$SYSTEMROOT")/System32/tar.exe" -xf "$file" # bsdtar: reads zip, fastest here
+        else
+          tar -xzf "$file"
+        fi
+        rm "$file"
+
+        echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+        {
+          echo "GOTOOLCHAIN=local"
+          echo "GOCACHE=$RUNNER_TEMP/go-build"
+          echo "GOMODCACHE=$RUNNER_TEMP/go-mod"
+        } >> "$GITHUB_ENV"
+        {
+          echo "cache-path<<EOF"
+          echo "$RUNNER_TEMP/go-build"
+          echo "$RUNNER_TEMP/go-mod"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        "$RUNNER_TEMP/go/bin/go" version
