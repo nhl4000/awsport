@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci-speed
   pull_request:
 
 permissions:
@@ -25,20 +26,46 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go build ./...
+          cache-dependency-path: go.sum
+      # vet type-checks every package, so a separate `go build` adds nothing.
       - run: go vet ./...
       - run: go test ./...
 
+  # Builds every release target on each PR, so a broken cross-compile shows up
+  # before tagging. Its build cache is what the release workflow starts from.
   goreleaser-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: goreleaser-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', '.goreleaser.yaml') }}
+          restore-keys: goreleaser-${{ runner.os }}-
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: check
+          install-only: true
+      - run: goreleaser check
+      - run: goreleaser build --snapshot --clean
+      # Saved from main only: PRs and release tags restore it, and one entry per
+      # dependency set keeps the cache small.
+      - if: github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ steps.cache.outputs.cache-primary-key }}

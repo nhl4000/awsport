@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run on any branch: the same build as a release, packaged but not published.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,18 +13,33 @@ permissions:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    env:
+      # Same flags as the GoReleaser builds, so `go test` reuses their compiled
+      # packages from the build cache (see the goreleaser-check job in ci.yml).
+      CGO_ENABLED: "0"
+      GOFLAGS: -trimpath
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false
+      # Tag runs can read caches saved on the default branch: the goreleaser-check
+      # job in ci.yml saves this one on pushes to main.
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: goreleaser-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', '.goreleaser.yaml') }}
+          restore-keys: goreleaser-${{ runner.os }}-
       - run: go test ./...
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
