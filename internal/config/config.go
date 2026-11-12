@@ -45,23 +45,26 @@ type SSO struct {
 
 // Config is the user or team configuration (and the merged effective view).
 type Config struct {
-	SSO          SSO             `yaml:"sso,omitempty"`
-	Regions      []string        `yaml:"regions,omitempty"` // extra regions to scan
-	Presets      []core.PortSpec `yaml:"presets,omitempty"` // EC2 port presets
-	Groups       []core.Group    `yaml:"groups,omitempty"`
-	ShellCommand string          `yaml:"shell_command,omitempty"`
-	Reconnect    *bool           `yaml:"reconnect,omitempty"`    // default true
-	MaxFailures  int             `yaml:"max_failures,omitempty"` // default 5
-	TeamSource   string          `yaml:"team_source,omitempty"`  // URL/path last imported (for re-import)
+	SSO           SSO                 `yaml:"sso,omitempty"`
+	Regions       []string            `yaml:"regions,omitempty"` // extra regions to scan
+	Presets       []core.PortSpec     `yaml:"presets,omitempty"` // EC2 port presets
+	PortDocuments []core.PortDocument `yaml:"port_documents,omitempty"`
+	BastionNames  []string            `yaml:"bastion_names,omitempty"` // EC2 Name tags used as bastions (one '*' wildcard allowed)
+	Groups        []core.Group        `yaml:"groups,omitempty"`
+	ShellCommand  string              `yaml:"shell_command,omitempty"`
+	Reconnect     *bool               `yaml:"reconnect,omitempty"`    // default true
+	MaxFailures   int                 `yaml:"max_failures,omitempty"` // default 5
+	TeamSource    string              `yaml:"team_source,omitempty"`  // URL/path last imported (for re-import)
 }
 
 // DefaultPresets are the built-in EC2 port presets.
 var DefaultPresets = []core.PortSpec{{Name: "mailpit", Remote: 8025}, {Name: "http", Remote: 80}, {Name: "https", Remote: 443}, {Name: "app", Remote: 8080}, {Name: "node", Remote: 3000}}
 
 // Load returns the effective config: defaults <- team.yaml <- config.yaml.
-// Scalars from later layers win when set; Regions from the user replace the
-// team's when non-empty; Presets merge by Remote and Groups by Name, with
-// later layers winning. Missing files are not an error.
+// Scalars from later layers win when set; Regions and BastionNames from the
+// user replace the team's when non-empty; Presets merge by Remote,
+// PortDocuments by Profile+Name+Remote and Groups by Name, with later layers
+// winning. Missing files are not an error.
 func Load() (*Config, error) {
 	teamPath, err := TeamConfigPath()
 	if err != nil {
@@ -219,7 +222,11 @@ func merge(base, over *Config) *Config {
 	if len(over.Regions) > 0 {
 		out.Regions = append([]string(nil), over.Regions...)
 	}
+	if len(over.BastionNames) > 0 {
+		out.BastionNames = append([]string(nil), over.BastionNames...)
+	}
 	out.Presets = mergePresets(base.Presets, over.Presets)
+	out.PortDocuments = mergePortDocuments(base.PortDocuments, over.PortDocuments)
 	out.Groups = mergeGroups(base.Groups, over.Groups)
 	if over.ShellCommand != "" {
 		out.ShellCommand = over.ShellCommand
@@ -252,6 +259,30 @@ func mergePresets(base, over []core.PortSpec) []core.PortSpec {
 		}
 		idx[p.Remote] = len(out)
 		out = append(out, p)
+	}
+	return out
+}
+
+// mergePortDocuments keeps base order, replacing entries with the same
+// Profile, Name and Remote as one in over and appending new ones.
+func mergePortDocuments(base, over []core.PortDocument) []core.PortDocument {
+	type key struct {
+		profile, name string
+		remote        int
+	}
+	out := append([]core.PortDocument(nil), base...)
+	idx := make(map[key]int, len(out))
+	for i, d := range out {
+		idx[key{d.Profile, d.Name, d.Remote}] = i
+	}
+	for _, d := range over {
+		k := key{d.Profile, d.Name, d.Remote}
+		if i, ok := idx[k]; ok {
+			out[i] = d
+			continue
+		}
+		idx[k] = len(out)
+		out = append(out, d)
 	}
 	return out
 }

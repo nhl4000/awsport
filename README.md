@@ -191,13 +191,15 @@ awsport works with untagged resources, but tags make it smarter:
 | Tag               | On  | Value                       | Effect                                                        |
 | ----------------- | --- | --------------------------- | ------------------------------------------------------------- |
 | `awsport:ports`   | EC2 | `mailpit:8025,app:8080`     | ports offered for this instance (in addition to presets)      |
+| `awsport:ports`   | EC2 | `mailpit:8025@acme-staging-mailpit-port-forward` | forward this port with a [custom SSM document](#custom-ssm-documents) |
 | `awsport:bastion` | EC2 | `true`                      | use this instance to reach RDS in its account/region          |
 | `awsport:shell`   | EC2 | `sudo su - ubuntu`          | command run when opening an interactive shell                 |
 
 Bastion resolution for RDS tunnels, per profile and region: an instance tagged
-`awsport:bastion=true` (running, SSM online) → an instance named
-`management-bastion` → the bastion you picked earlier → otherwise awsport asks
-you to pick one of the SSM-online instances and remembers the choice.
+`awsport:bastion=true` (running, SSM online) → an instance whose `Name` tag
+matches `bastion_names` in the config (exact, or with one `*` wildcard; none by
+default) → the bastion you picked earlier → otherwise awsport asks you to pick
+one of the SSM-online instances and remembers the choice.
 
 Instances need the SSM agent and an instance profile allowing SSM
 (e.g. `AmazonSSMManagedInstanceCore`). Instances that can't be reached are
@@ -272,6 +274,9 @@ regions: [us-east-1, us-west-2]
 presets:
   - { name: mailpit, remote: 8025 }
   - { name: app, remote: 8080 }
+bastion_names: [acme-bastion]
+port_documents:
+  - { name: "acme-staging-*", remote: 8025, document: acme-staging-mailpit-port-forward }
 shell_command: sudo su - ubuntu
 reconnect: true
 max_failures: 5
@@ -285,10 +290,50 @@ groups:
 Import it with `awsport init --from github:your-org/your-repo/awsport.team.yaml`
 (private repos work through your GitHub login), an `https://` URL, or a file
 path; `awsport init --refresh` pulls changes later. Your own `config.yaml` wins over the team file; presets and
-groups are merged by remote port / name.
+groups are merged by remote port / name, `port_documents` by profile + name +
+remote port, and a non-empty `regions` or `bastion_names` replaces the team's.
 
 Group members match resources by kind + name (EC2 `Name` tag or RDS
 identifier) and, if set, region — so groups survive instance replacement.
+
+## Custom SSM documents
+
+By default awsport forwards ports with the AWS-provided
+`AWS-StartPortForwardingSession` document. Least-privilege permission sets
+often allow `ssm:StartSession` only with specific custom Session documents
+(for example `arn:aws:ssm:*:*:document/*-mailpit-port-forward`, usually with
+the `ssm:SessionDocumentAccessCheck` condition); the generic document is then
+denied. When that happens, the tunnel error says so and points here.
+
+Bind a port to its document either on the instance or in the config:
+
+- **Tag**: append `@<document>` to an `awsport:ports` entry —
+  `mailpit:8025@acme-staging-mailpit-port-forward` or `8025@acme-staging-mailpit-port-forward`
+  (a document ARN works too).
+- **Config** (team or personal), matched against the EC2 `Name` tag (exact, or
+  with one `*` wildcard) and optionally a profile (exact):
+
+  ```yaml
+  port_documents:
+    - name: "acme-staging-*"
+      remote: 8025
+      document: acme-staging-mailpit-port-forward
+    - profile: acme-prod-developer
+      name: acme-web
+      remote: 8080
+      document: acme-prod-web-port-forward
+  ```
+
+  The port is added to matching instances if it isn't offered already. When
+  several entries match one port, a profile-scoped entry beats an unscoped one
+  and an exact name beats a wildcard.
+
+A document set on the tag wins over the config; presets and manually added
+ports never remove a document. awsport then runs
+`aws ssm start-session --target <instance> --document-name <document> --parameters '{"localPortNumber":["<local port>"]}'`:
+a custom port-forwarding document (`sessionType: Port`) fixes the remote port
+itself and rejects parameters it doesn't declare, so `portNumber` is not
+passed. The TUI shows `via <document>` on such ports and tunnels.
 
 ## CLI reference
 
@@ -376,6 +421,10 @@ everything awsport does:
 
 Narrow `arn:aws:ec2:*:*:instance/*` (e.g. with an `ssm:resourceTag` condition)
 if users should only reach some instances.
+
+If your permission set only allows specific custom port-forwarding documents
+instead of `AWS-StartPortForwardingSession`, bind them to their ports as
+described in [Custom SSM documents](#custom-ssm-documents).
 
 ## Development
 

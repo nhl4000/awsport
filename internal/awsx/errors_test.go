@@ -90,6 +90,21 @@ func TestParseAccessDenied(t *testing.T) {
 	}
 }
 
+func TestDeniedResource(t *testing.T) {
+	tests := []struct{ msg, want string }{
+		{"User: " + testPrincipal + " is not authorized to perform: ssm:StartSession on resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession because no identity-based policy allows the ssm:StartSession action",
+			"arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession"},
+		{"is not authorized to perform: ssm:StartSession on resource: arn:aws:ec2:us-east-1:123456789012:instance/i-0123456789abcdef0.",
+			"arn:aws:ec2:us-east-1:123456789012:instance/i-0123456789abcdef0"},
+		{"An error occurred (AccessDeniedException) when calling the StartSession operation", ""},
+	}
+	for _, tt := range tests {
+		if got := DeniedResource(tt.msg); got != tt.want {
+			t.Errorf("DeniedResource(%q) = %q, want %q", tt.msg, got, tt.want)
+		}
+	}
+}
+
 func TestPermissionError(t *testing.T) {
 	tests := []struct {
 		principal, set, hint string

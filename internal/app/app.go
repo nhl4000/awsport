@@ -122,7 +122,7 @@ func (a *App) discover(ctx context.Context, p core.Profile, regions []string) ([
 	if len(regions) == 0 {
 		return nil, fmt.Errorf("profile %q has no region and no regions are configured", p.Name)
 	}
-	res, err := a.AWS.Discover(ctx, p, regions, a.Cfg.Presets, a.Cfg.EffectiveShell(), a.manualPorts)
+	res, err := a.AWS.Discover(ctx, p, regions, a.Cfg.Presets, a.Cfg.PortDocuments, a.Cfg.EffectiveShell(), a.manualPorts)
 	if err != nil {
 		return res, fmt.Errorf("discover %s: %w", p.Name, err)
 	}
@@ -199,6 +199,7 @@ func (a *App) Connect(ctx context.Context, r core.Resource, remote int) (core.Tu
 	switch r.Kind {
 	case core.KindEC2:
 		spec.Target = r.ID
+		spec.Document = portDocument(r, remote)
 	case core.KindRDS:
 		if r.Port > 0 {
 			remote = r.Port
@@ -211,7 +212,7 @@ func (a *App) Connect(ctx context.Context, r core.Resource, remote int) (core.Tu
 			return core.TunnelSpec{}, fmt.Errorf("find bastion for %s: %w", r.Name, err)
 		}
 		saved := a.State.Get().Bastions[cacheKey(r.Profile, r.Region)]
-		b, err := awsx.PickBastion(resources, r.Profile, r.Region, saved)
+		b, err := awsx.PickBastion(resources, r.Profile, r.Region, saved, a.Cfg.BastionNames)
 		if err != nil {
 			var nb *awsx.NeedBastionError
 			if errors.As(err, &nb) {
@@ -281,6 +282,16 @@ func portLabel(r core.Resource, remote int) string {
 		}
 	}
 	return strconv.Itoa(remote)
+}
+
+// portDocument returns the custom SSM document bound to remote on r, or "".
+func portDocument(r core.Resource, remote int) string {
+	for _, p := range r.Ports {
+		if p.Remote == remote {
+			return p.Document
+		}
+	}
+	return ""
 }
 
 // SetBastion saves the bastion instance for profile+region.

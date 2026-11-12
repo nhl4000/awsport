@@ -158,11 +158,16 @@ func NewManager(o Options) *Manager {
 	}
 }
 
-// Args returns the aws CLI arguments for a port-forwarding session.
+// Args returns the aws CLI arguments for a port-forwarding session. A custom
+// document (spec.Document) on an instance fixes the remote port itself and
+// rejects undeclared parameters, so only localPortNumber is passed; with a
+// remote host, host and portNumber are passed as well.
 func Args(spec core.TunnelSpec) []string {
 	params := map[string][]string{
-		"portNumber":      {strconv.Itoa(spec.RemotePort)},
 		"localPortNumber": {strconv.Itoa(spec.LocalPort)},
+	}
+	if spec.Document == "" || spec.RemoteHost != "" {
+		params["portNumber"] = []string{strconv.Itoa(spec.RemotePort)}
 	}
 	if spec.RemoteHost != "" {
 		params["host"] = []string{spec.RemoteHost}
@@ -497,12 +502,21 @@ func exitReason(err error) string {
 }
 
 // deniedReason is the session error when IAM denied action on target.
-func deniedReason(target, action string) string {
+// resource is the denied resource ARN from the AWS message ("" if unknown);
+// when it is an AWS-provided port-forwarding document and spec uses none of
+// its own, the role likely only allows custom documents, so the reason says
+// how to bind one to this port.
+func deniedReason(spec core.TunnelSpec, action, resource string) string {
 	if action == "" {
 		action = "ssm:StartSession"
 	}
-	return fmt.Sprintf("not allowed to start an SSM session on %s (missing %s). Ask your AWS admin to allow it — see %s",
-		target, action, awsx.IAMDocsURL)
+	reason := fmt.Sprintf("not allowed to start an SSM session on %s (missing %s).", spec.Target, action)
+	if spec.Document == "" && spec.RemoteHost == "" && strings.HasSuffix(resource, ":document/AWS-StartPortForwardingSession") {
+		reason += fmt.Sprintf(" Your role may only allow specific SSM documents. If your team uses one for this port,"+
+			" add it to the instance tag: %s = <name>:%d@<document> or to port_documents in the team config — see %s.",
+			core.TagPorts, spec.RemotePort, awsx.CustomDocumentsURL)
+	}
+	return fmt.Sprintf("%s Ask your AWS admin to allow it — see %s", reason, awsx.IAMDocsURL)
 }
 
 // runOnce runs one process for the session and returns how long it was Up,
@@ -544,7 +558,7 @@ func (m *Manager) runOnce(ctx context.Context, e *entry) (upFor time.Duration, a
 			}
 			if denied == "" {
 				if action, _, ok := awsx.ParseAccessDenied(line); ok {
-					denied = deniedReason(e.spec.Target, action)
+					denied = deniedReason(e.spec, action, awsx.DeniedResource(line))
 				}
 			}
 			m.onLine(e, line, up)

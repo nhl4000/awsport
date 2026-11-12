@@ -216,6 +216,42 @@ groups:
 	}
 }
 
+func TestLoadPortDocumentsAndBastionNames(t *testing.T) {
+	dir := setDirs(t)
+	writeFile(t, filepath.Join(dir, "team.yaml"), `bastion_names: [acme-bastion, "acme-jump-*"]
+port_documents:
+  - {name: "acme-staging-*", remote: 8025, document: acme-staging-mailpit-port-forward}
+  - {profile: acme-prod, name: acme-web, remote: 8080, document: acme-prod-web-port-forward}
+`)
+	writeFile(t, filepath.Join(dir, "config.yaml"), `port_documents:
+  - {profile: acme-prod, name: acme-web, remote: 8080, document: my-web-port-forward}
+  - {name: acme-web, remote: 8080, document: other-port-forward}
+`)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []core.PortDocument{
+		{Name: "acme-staging-*", Remote: 8025, Document: "acme-staging-mailpit-port-forward"},
+		{Profile: "acme-prod", Name: "acme-web", Remote: 8080, Document: "my-web-port-forward"},
+		{Name: "acme-web", Remote: 8080, Document: "other-port-forward"},
+	}
+	if !reflect.DeepEqual(c.PortDocuments, want) {
+		t.Fatalf("port_documents =\n%v\nwant\n%v", c.PortDocuments, want)
+	}
+	if !reflect.DeepEqual(c.BastionNames, []string{"acme-bastion", "acme-jump-*"}) {
+		t.Fatalf("bastion_names = %v", c.BastionNames)
+	}
+
+	writeFile(t, filepath.Join(dir, "config.yaml"), "bastion_names: [my-bastion]\n")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.BastionNames, []string{"my-bastion"}) {
+		t.Fatalf("user bastion_names should replace team's, got %v", c.BastionNames)
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	dir := setDirs(t)
 	writeFile(t, filepath.Join(dir, "config.yaml"), "bogus: 1\n")

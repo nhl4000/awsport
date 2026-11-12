@@ -125,6 +125,7 @@ type discoverOptions struct {
 	profile      string
 	region       string
 	presets      []core.PortSpec
+	documents    []core.PortDocument
 	shellDefault string
 	manual       func(profile, region, name string) []core.PortSpec
 }
@@ -161,11 +162,12 @@ func newRegionClients(cfg aws.Config, profile string) regionClients {
 
 // Discover lists EC2 instances (excluding terminated, with SSM ping status,
 // Name tag and awsport:* tags) and RDS DB instances + clusters (writer
-// endpoint) in parallel across regions. Per-region errors are aggregated and
-// returned alongside whatever was found: access-denied calls as
-// *PermissionError, auth errors wrapped with ErrCredentials.
+// endpoint) in parallel across regions. EC2 ports merge presets < config
+// port documents < awsport:ports tag < manual ports. Per-region errors are
+// aggregated and returned alongside whatever was found: access-denied calls
+// as *PermissionError, auth errors wrapped with ErrCredentials.
 func (d *Discoverer) Discover(ctx context.Context, p core.Profile, regions []string, presets []core.PortSpec,
-	shellDefault string, manual func(profile, region, name string) []core.PortSpec) ([]core.Resource, error) {
+	documents []core.PortDocument, shellDefault string, manual func(profile, region, name string) []core.PortSpec) ([]core.Resource, error) {
 	if len(regions) == 0 {
 		return nil, fmt.Errorf("no regions to scan for profile %s: set a region on the profile or add regions to the awsport config", p.Name)
 	}
@@ -185,6 +187,7 @@ func (d *Discoverer) Discover(ctx context.Context, p core.Profile, regions []str
 				profile:      p.Name,
 				region:       region,
 				presets:      presets,
+				documents:    documents,
 				shellDefault: shellDefault,
 				manual:       manual,
 			})
@@ -281,7 +284,8 @@ func ec2Resource(inst ec2Instance, online map[string]bool, o discoverOptions) co
 	for _, t := range inst.Tags {
 		tags[t.Key] = t.Value
 	}
-	name := strings.TrimSpace(tags["Name"])
+	tagName := strings.TrimSpace(tags["Name"])
+	name := tagName
 	if name == "" {
 		name = inst.ID
 	}
@@ -306,7 +310,7 @@ func ec2Resource(inst ec2Instance, online map[string]bool, o discoverOptions) co
 		State:        inst.State,
 		SSMOnline:    online[inst.ID],
 		IsBastion:    strings.EqualFold(strings.TrimSpace(tags[core.TagBastion]), "true"),
-		Ports:        mergePorts(o.presets, parsePortsTag(tags[core.TagPorts]), manual),
+		Ports:        mergePorts(o.presets, documentPorts(o.documents, o.profile, tagName), parsePortsTag(tags[core.TagPorts]), manual),
 		ShellCommand: shell,
 	}
 	switch {

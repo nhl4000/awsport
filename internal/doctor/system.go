@@ -60,7 +60,7 @@ func System(version, commit string) Deps {
 		Profiles:    awsx.ListProfiles,
 		Credentials: disc.CheckCredentials,
 		Discover: func(ctx context.Context, p core.Profile, region string) ([]core.Resource, error) {
-			return disc.Discover(ctx, p, []string{region}, nil, "", nil)
+			return disc.Discover(ctx, p, []string{region}, nil, nil, "", nil)
 		},
 		Agent:    agent.Inspect,
 		AgentLog: logPath,

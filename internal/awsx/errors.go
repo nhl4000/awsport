@@ -14,6 +14,9 @@ import (
 // IAMDocsURL documents the IAM actions awsport needs.
 const IAMDocsURL = "https://github.com/nhl4000/awsport#iam-permissions"
 
+// CustomDocumentsURL documents binding custom SSM session documents to ports.
+const CustomDocumentsURL = "https://github.com/nhl4000/awsport#custom-ssm-documents"
+
 // ErrSSOTokenExpired means the cached SSO access token is missing or expired;
 // the user has to run `aws sso login`.
 var ErrSSOTokenExpired = errors.New("sso token missing or expired")
@@ -297,6 +300,7 @@ var (
 	deniedActionRe = regexp.MustCompile(`not authorized to perform:?\s+([A-Za-z0-9-]+:[A-Za-z0-9*]+)`)
 	deniedPolicyRe = regexp.MustCompile(`allows the ([A-Za-z0-9-]+:[A-Za-z0-9*]+) action`)
 	principalRe    = regexp.MustCompile(`User: (arn:[^\s]+)`)
+	resourceRe     = regexp.MustCompile(`on resource:?\s+(arn:[^\s]+)`)
 )
 
 // deniedMarkers identify access-denied (authorization) failures in AWS error
@@ -331,4 +335,13 @@ func ParseAccessDenied(msg string) (action, principal string, ok bool) {
 		principal = strings.TrimRight(m[1], ".,;")
 	}
 	return action, principal, true
+}
+
+// DeniedResource returns the resource ARN an access-denied message names
+// ("... on resource: arn:aws:ssm:...:document/X because ..."), or "".
+func DeniedResource(msg string) string {
+	if m := resourceRe.FindStringSubmatch(msg); m != nil {
+		return strings.TrimRight(m[1], ".,;")
+	}
+	return ""
 }

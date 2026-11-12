@@ -524,6 +524,15 @@ func portLabel(r core.Resource, remote int) string {
 	return strconv.Itoa(remote)
 }
 
+// bastionNamesNote renders the configured bastion_names for the bastion
+// picker hint: "" when none are configured.
+func bastionNamesNote(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return " or named " + strings.Join(names, ", ")
+}
+
 // profileTunnels counts active tunnels per profile.
 func profileTunnels(sessions []tunnel.Session) map[string]int {
 	out := map[string]int{}

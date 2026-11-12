@@ -44,6 +44,12 @@ func TestParsePortsTag(t *testing.T) {
 		{" mailpit : 8025 , 9000 ,, app:8080 ", []core.PortSpec{{Name: "mailpit", Remote: 8025}, {Name: "", Remote: 9000}, {Name: "app", Remote: 8080}}},
 		{"web:80 api:3000", []core.PortSpec{{Name: "web", Remote: 80}, {Name: "api", Remote: 3000}}},
 		{"bad:x,0,70000,ok:22", []core.PortSpec{{Name: "ok", Remote: 22}}},
+		{"mailpit:8025@acme-staging-mailpit-port-forward,9000@acme-port-forward",
+			[]core.PortSpec{{Name: "mailpit", Remote: 8025, Document: "acme-staging-mailpit-port-forward"}, {Remote: 9000, Document: "acme-port-forward"}}},
+		{"web : 80 @ acme-web-port-forward; app:8080 api:3000@arn:aws:ssm:us-east-1:123456789012:document/acme-api",
+			[]core.PortSpec{{Name: "web", Remote: 80, Document: "acme-web-port-forward"}, {Name: "app", Remote: 8080},
+				{Name: "api", Remote: 3000, Document: "arn:aws:ssm:us-east-1:123456789012:document/acme-api"}}},
+		{"bad:80@,x:81@a b:82@bad!doc,ok:83", []core.PortSpec{{Name: "ok", Remote: 83}}},
 		{"", nil},
 	}
 	for _, tt := range tests {
@@ -67,13 +73,101 @@ func TestMergePorts(t *testing.T) {
 	}
 }
 
+func TestMergePortsKeepsDocument(t *testing.T) {
+	presets := []core.PortSpec{{Name: "mailpit", Remote: 8025}, {Name: "app", Remote: 8080}}
+	docs := []core.PortSpec{{Remote: 8025, Document: "acme-mailpit-port-forward"}, {Remote: 9000, Document: "acme-port-forward"}}
+	tag := []core.PortSpec{{Name: "mail", Remote: 8025}, {Name: "app", Remote: 8080, Document: "acme-app-port-forward"}, {Remote: 9000, Document: "acme-tag-port-forward"}}
+	manual := []core.PortSpec{{Name: "m", Remote: 8025}}
+	got := mergePorts(presets, docs, tag, manual)
+	want := []core.PortSpec{
+		{Name: "m", Remote: 8025, Document: "acme-mailpit-port-forward"},
+		{Name: "app", Remote: 8080, Document: "acme-app-port-forward"},
+		{Remote: 9000, Document: "acme-tag-port-forward"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergePorts = %v, want %v", got, want)
+	}
+	// A preset listed after a document never erases it.
+	if got := mergePorts(docs[:1], presets[:1]); !reflect.DeepEqual(got, []core.PortSpec{{Name: "mailpit", Remote: 8025, Document: "acme-mailpit-port-forward"}}) {
+		t.Errorf("preset erased document: %v", got)
+	}
+}
+
+func TestNameMatches(t *testing.T) {
+	tests := []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"acme-web", "acme-web", true},
+		{"acme-web", "acme-web-2", false},
+		{"acme-*", "acme-web", true},
+		{"acme-*", "acme-", true},
+		{"*-bastion", "acme-bastion", true},
+		{"acme-*-web", "acme-staging-web", true},
+		{"acme-*-web", "acme-web", false},
+		{"*", "anything", true},
+		{"*", "", false},
+		{"acme-*", "other-web", false},
+	}
+	for _, tt := range tests {
+		if got := nameMatches(tt.pattern, tt.name); got != tt.want {
+			t.Errorf("nameMatches(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestDocumentPorts(t *testing.T) {
+	docs := []core.PortDocument{
+		{Profile: "acme-prod", Name: "acme-web", Remote: 8025, Document: "scoped-exact"},
+		{Name: "acme-web", Remote: 8025, Document: "exact"},
+		{Profile: "acme-prod", Name: "acme-*", Remote: 8025, Document: "scoped-wild"},
+		{Name: "acme-*", Remote: 8025, Document: "wild"},
+		{Name: "acme-*", Remote: 9000, Document: "other-port"},
+		{Name: "acme-*", Remote: 9001},
+	}
+	last := func(ps []core.PortSpec, remote int) string {
+		doc := ""
+		for _, p := range mergePorts(ps) {
+			if p.Remote == remote {
+				doc = p.Document
+			}
+		}
+		return doc
+	}
+	tests := []struct {
+		profile, name, want8025, want9000 string
+	}{
+		{"acme-prod", "acme-web", "scoped-exact", "other-port"},
+		{"acme-dev", "acme-web", "exact", "other-port"},
+		{"acme-prod", "acme-api", "scoped-wild", "other-port"},
+		{"acme-dev", "acme-api", "wild", "other-port"},
+		{"acme-dev", "other", "", ""},
+		{"acme-dev", "", "", ""},
+	}
+	for _, tt := range tests {
+		got := documentPorts(docs, tt.profile, tt.name)
+		if d := last(got, 8025); d != tt.want8025 {
+			t.Errorf("%s/%s: 8025 document = %q, want %q", tt.profile, tt.name, d, tt.want8025)
+		}
+		if d := last(got, 9000); d != tt.want9000 {
+			t.Errorf("%s/%s: 9000 document = %q, want %q", tt.profile, tt.name, d, tt.want9000)
+		}
+		for _, p := range got {
+			if p.Remote == 9001 {
+				t.Errorf("%s/%s: entry without document applied", tt.profile, tt.name)
+			}
+		}
+	}
+}
+
 func TestPickBastion(t *testing.T) {
 	ec2 := func(id, name, state string, online, tagged bool) core.Resource {
 		return core.Resource{Kind: core.KindEC2, Profile: "example", Region: "ca-central-1", ID: id, Name: name,
 			State: state, SSMOnline: online, IsBastion: tagged}
 	}
 	app := ec2("i-app", "app", "running", true, false)
-	named := ec2("i-named", core.DefaultBastionName, "running", true, false)
+	named := ec2("i-named", "acme-bastion", "running", true, false)
+	wild := ec2("i-wild", "acme-jump-1", "running", true, false)
 	tagged := ec2("i-tagged", "jump", "running", true, true)
 	taggedOffline := ec2("i-tagged-off", "jump-old", "running", false, true)
 	taggedStopped := ec2("i-tagged-stop", "jump-stopped", "stopped", true, true)
@@ -90,6 +184,8 @@ func TestPickBastion(t *testing.T) {
 	}{
 		{"tag wins over name and saved", []core.Resource{app, named, tagged}, "i-app", "i-tagged", nil},
 		{"name wins over saved", []core.Resource{app, named, taggedOffline}, "i-app", "i-named", nil},
+		{"earlier name wins", []core.Resource{wild, named}, "", "i-named", nil},
+		{"wildcard name", []core.Resource{app, wild}, "i-app", "i-wild", nil},
 		{"saved used", []core.Resource{app, taggedStopped, db}, "i-app", "i-app", nil},
 		{"saved must be connectable", []core.Resource{app, taggedOffline}, "i-tagged-off", "", []string{"i-app"}},
 		{"other region ignored", []core.Resource{otherRegion, app}, "", "", []string{"i-app"}},
@@ -97,7 +193,7 @@ func TestPickBastion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := PickBastion(tt.resources, "example", "ca-central-1", tt.saved)
+			got, err := PickBastion(tt.resources, "example", "ca-central-1", tt.saved, []string{"acme-bastion", "acme-jump-*"})
 			if tt.candidates == nil {
 				if err != nil || got.ID != tt.wantID {
 					t.Fatalf("got (%s, %v), want %s", got.ID, err, tt.wantID)
@@ -119,6 +215,16 @@ func TestPickBastion(t *testing.T) {
 				t.Error("empty error message")
 			}
 		})
+	}
+}
+
+func TestPickBastionNoNamesConfigured(t *testing.T) {
+	named := core.Resource{Kind: core.KindEC2, Profile: "example", Region: "ca-central-1", ID: "i-named",
+		Name: "acme-bastion", State: "running", SSMOnline: true}
+	_, err := PickBastion([]core.Resource{named}, "example", "ca-central-1", "", nil)
+	var need *NeedBastionError
+	if !errors.As(err, &need) {
+		t.Fatalf("err = %v, want *NeedBastionError without bastion_names", err)
 	}
 }
 
@@ -212,9 +318,15 @@ func TestDiscoverRegion(t *testing.T) {
 	}
 	var manualCalls []string
 	opts := discoverOptions{
-		profile:      "example",
-		region:       "ca-central-1",
-		presets:      []core.PortSpec{{Name: "http", Remote: 80}},
+		profile: "example",
+		region:  "ca-central-1",
+		presets: []core.PortSpec{{Name: "http", Remote: 80}},
+		documents: []core.PortDocument{
+			{Name: "web", Remote: 8025, Document: "acme-mailpit-port-forward"},
+			{Name: "w*", Remote: 8080, Document: "acme-app-port-forward"},
+			{Profile: "other", Name: "web", Remote: 80, Document: "acme-other-port-forward"},
+			{Name: "i-stopped", Remote: 81, Document: "acme-id-port-forward"}, // matches Name tags only
+		},
 		shellDefault: "sh",
 		manual: func(profile, region, name string) []core.PortSpec {
 			manualCalls = append(manualCalls, profile+"/"+region+"/"+name)
@@ -244,7 +356,8 @@ func TestDiscoverRegion(t *testing.T) {
 		ec2r(core.Resource{ID: "i-jump", Name: "jump", State: "running", IsBastion: true, Ports: []core.PortSpec{{Name: "http", Remote: 80}},
 			ShellCommand: "sh", Unreachable: reasonSSMOffline}),
 		ec2r(core.Resource{ID: "i-web", Name: "web", State: "running", SSMOnline: true, ShellCommand: "bash -l",
-			Ports: []core.PortSpec{{Name: "http", Remote: 80}, {Name: "api", Remote: 3000}, {Name: "mailpit", Remote: 8025}, {Name: "debug", Remote: 9229}}}),
+			Ports: []core.PortSpec{{Name: "http", Remote: 80}, {Name: "api", Remote: 3000}, {Name: "mailpit", Remote: 8025, Document: "acme-mailpit-port-forward"},
+				{Remote: 8080, Document: "acme-app-port-forward"}, {Name: "debug", Remote: 9229}}}),
 		rdsr(core.Resource{ID: "aurora", State: "available", Host: "aurora.cluster-example.internal", Port: 5432, Engine: "aurora-postgresql"}),
 		rdsr(core.Resource{ID: "paused", State: "stopped", Engine: "mysql", Unreachable: "RDS status stopped"}),
 		rdsr(core.Resource{ID: "standalone", State: "available", Host: "standalone.example.internal", Port: 5432, Engine: "postgres"}),

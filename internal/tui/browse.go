@@ -266,7 +266,7 @@ func resourceDesc(r core.Resource) string {
 		if len(r.Ports) > 0 {
 			ps := make([]string, 0, len(r.Ports))
 			for _, p := range r.Ports {
-				ps = append(ps, p.String())
+				ps = append(ps, core.PortSpec{Name: p.Name, Remote: p.Remote}.String())
 			}
 			parts = append(parts, "ports "+strings.Join(ps, ", "))
 		}
@@ -353,7 +353,10 @@ func (m *model) rebuildPorts() tea.Cmd {
 			}
 			desc = statusGlyph(s.Status) + " " + statusText(s) + " · " + linkAddr(s.Spec) + " · " + hint
 		}
-		items = append(items, item{title: p.String(), desc: desc, key: "port:" + strconv.Itoa(p.Remote)})
+		if p.Document != "" {
+			desc = "via " + p.Document + " · " + desc
+		}
+		items = append(items, item{title: core.PortSpec{Name: p.Name, Remote: p.Remote}.String(), desc: desc, key: "port:" + strconv.Itoa(p.Remote)})
 	}
 	items = append(items, item{title: "+ add a port…", desc: "forward another remote port (remembered for this instance name)", key: "add"})
 	if r.SSMOnline {
@@ -455,12 +458,15 @@ func (m *model) onManualPort(msg manualPortMsg) tea.Cmd {
 	return tea.Batch(m.rebuildResources(), m.rebuildPorts())
 }
 
-// withPort adds p to ports, replacing an entry with the same remote port.
+// withPort adds p to ports, replacing an entry with the same remote port
+// (keeping its document when p has none, as discovery does).
 func withPort(ports []core.PortSpec, p core.PortSpec) []core.PortSpec {
 	out := make([]core.PortSpec, 0, len(ports)+1)
 	for _, x := range ports {
 		if x.Remote != p.Remote {
 			out = append(out, x)
+		} else if p.Document == "" {
+			p.Document = x.Document
 		}
 	}
 	return append(out, p)

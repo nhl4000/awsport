@@ -32,9 +32,13 @@ func (m *model) rebuildDashboard() tea.Cmd {
 		if m.selected[s.Spec.Key] {
 			box = "[x]"
 		}
+		desc := s.Spec.Profile + " · " + sessionDetail(s, now)
+		if s.Spec.Document != "" {
+			desc += " · via " + s.Spec.Document
+		}
 		items = append(items, item{
 			title: fmt.Sprintf("%s %s %s", box, statusGlyph(s.Status), s.Spec.Label),
-			desc:  s.Spec.Profile + " · " + sessionDetail(s, now),
+			desc:  desc,
 			key:   s.Spec.Key,
 		})
 	}

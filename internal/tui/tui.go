@@ -1051,8 +1051,8 @@ func (m *model) preamble() string {
 		}
 	case scrBastion:
 		if m.bastion != nil {
-			s = fmt.Sprintf("%s:%d needs a bastion in %s/%s. No SSM-online instance is tagged %s=true or named %q.",
-				m.pending.r.Name, m.pending.remote, m.bastion.Profile, m.bastion.Region, core.TagBastion, core.DefaultBastionName)
+			s = fmt.Sprintf("%s:%d needs a bastion in %s/%s. No SSM-online instance is tagged %s=true%s.",
+				m.pending.r.Name, m.pending.remote, m.bastion.Profile, m.bastion.Region, core.TagBastion, bastionNamesNote(m.a.Cfg.BastionNames))
 			if len(m.bastion.Candidates) == 0 {
 				s += "\n" + errStyle.Render("No running SSM-online instance found; start one or tag a bastion, then retry.")
 				if ssmDenied(m.resPerms[m.bastion.Profile]) {

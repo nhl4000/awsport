@@ -27,6 +27,24 @@ presets:
   - name: app
     remote: 8080
 
+# Custom SSM session documents for specific ports, for permission sets that
+# only allow those instead of AWS-StartPortForwardingSession. Matched against
+# the EC2 Name tag (exact, or one '*' wildcard) and optionally a profile; an
+# awsport:ports tag entry like mailpit:8025@<document> wins over these.
+# port_documents:
+#   - name: "acme-staging-*"
+#     remote: 8025
+#     document: acme-staging-mailpit-port-forward
+#   - profile: acme-prod-developer
+#     name: acme-web
+#     remote: 8080
+#     document: acme-prod-web-port-forward
+
+# EC2 Name tags used as the RDS bastion when no instance is tagged
+# awsport:bastion=true (exact, or one '*' wildcard). Empty by default.
+# bastion_names:
+#   - acme-bastion
+
 # Command run when opening an interactive shell (awsport:shell tag wins).
 shell_command: sudo su - ubuntu
 

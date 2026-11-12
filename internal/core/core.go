@@ -4,6 +4,7 @@ package core
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -18,9 +19,6 @@ const (
 
 // DefaultShellCommand runs on interactive session start unless overridden.
 const DefaultShellCommand = "sudo su - ubuntu"
-
-// DefaultBastionName is the Name tag fallback for bastion discovery.
-const DefaultBastionName = "management-bastion"
 
 // AuthKind classifies how a profile obtains credentials.
 type AuthKind string
@@ -51,17 +49,35 @@ const (
 	KindRDS ResourceKind = "rds"
 )
 
-// PortSpec is a named remote port.
+// PortSpec is a named remote port. Document, when set, is the custom SSM
+// session document (sessionType Port) used to forward this port instead of
+// AWS-StartPortForwardingSession.
 type PortSpec struct {
-	Name   string `json:"name" yaml:"name"`
-	Remote int    `json:"remote" yaml:"remote"`
+	Name     string `json:"name" yaml:"name"`
+	Remote   int    `json:"remote" yaml:"remote"`
+	Document string `json:"document,omitempty" yaml:"document,omitempty"`
 }
 
+// String renders "name:port", "port", and "@document" when one is set.
 func (p PortSpec) String() string {
-	if p.Name == "" {
-		return fmt.Sprintf("%d", p.Remote)
+	s := strconv.Itoa(p.Remote)
+	if p.Name != "" {
+		s = p.Name + ":" + s
 	}
-	return fmt.Sprintf("%s:%d", p.Name, p.Remote)
+	if p.Document != "" {
+		s += "@" + p.Document
+	}
+	return s
+}
+
+// PortDocument binds a custom SSM session document to a remote port of the
+// EC2 instances whose Name tag matches Name (exact, or with one '*'
+// wildcard), optionally only in Profile (exact).
+type PortDocument struct {
+	Profile  string `yaml:"profile,omitempty"`
+	Name     string `yaml:"name"`
+	Remote   int    `yaml:"remote"`
+	Document string `yaml:"document"`
 }
 
 // Resource is a discovered EC2 instance or RDS instance/cluster.
@@ -110,12 +126,16 @@ type TunnelSpec struct {
 	RemoteHost string // set => AWS-StartPortForwardingSessionToRemoteHost
 	RemotePort int
 	LocalPort  int
-	Temporary  bool // LocalPort is a session-only fallback; saved port was busy
+	Temporary  bool   // LocalPort is a session-only fallback; saved port was busy
+	Document   string // custom SSM session document; empty => the AWS-provided one
 }
 
 // SSMDocument returns the SSM document to use for this spec.
 func (t TunnelSpec) SSMDocument() string {
-	if t.RemoteHost != "" {
+	switch {
+	case t.Document != "":
+		return t.Document
+	case t.RemoteHost != "":
 		return "AWS-StartPortForwardingSessionToRemoteHost"
 	}
 	return "AWS-StartPortForwardingSession"

@@ -23,10 +23,11 @@ func (e *NeedBastionError) Error() string {
 }
 
 // PickBastion resolves the bastion used to reach RDS in profile/region:
-// an instance tagged awsport:bastion=true, then one named
-// core.DefaultBastionName, then the saved instance ID. Only running,
-// SSM-online EC2 instances qualify. Otherwise it returns *NeedBastionError.
-func PickBastion(resources []core.Resource, profile, region, saved string) (core.Resource, error) {
+// an instance tagged awsport:bastion=true, then one whose Name tag matches
+// one of names (exact, or with one '*' wildcard; earlier names first), then
+// the saved instance ID. Only running, SSM-online EC2 instances qualify.
+// Otherwise it returns *NeedBastionError.
+func PickBastion(resources []core.Resource, profile, region, saved string, names []string) (core.Resource, error) {
 	var candidates []core.Resource
 	for _, r := range resources {
 		if r.Kind == core.KindEC2 && r.Profile == profile && r.Region == region &&
@@ -34,11 +35,11 @@ func PickBastion(resources []core.Resource, profile, region, saved string) (core
 			candidates = append(candidates, r)
 		}
 	}
-	matchers := []func(core.Resource) bool{
-		func(r core.Resource) bool { return r.IsBastion },
-		func(r core.Resource) bool { return r.Name == core.DefaultBastionName },
-		func(r core.Resource) bool { return saved != "" && r.ID == saved },
+	matchers := []func(core.Resource) bool{func(r core.Resource) bool { return r.IsBastion }}
+	for _, n := range names {
+		matchers = append(matchers, func(r core.Resource) bool { return nameMatches(n, r.Name) })
 	}
+	matchers = append(matchers, func(r core.Resource) bool { return saved != "" && r.ID == saved })
 	for _, match := range matchers {
 		for _, r := range candidates {
 			if match(r) {

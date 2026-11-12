@@ -62,6 +62,9 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: User: arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Developer_0123456789abcdef/jane is not authorized to perform: ssm:StartSession on resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSessionToRemoteHost because no identity-based policy allows the ssm:StartSession action")
 		os.Exit(254)
+	case "deniedgeneric":
+		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: User: arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Developer_0123456789abcdef/jane is not authorized to perform: ssm:StartSession on resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession because no identity-based policy allows the ssm:StartSession action")
+		os.Exit(254)
 	case "deniedbare":
 		fmt.Fprintln(os.Stderr, "An error occurred (AccessDeniedException) when calling the StartSession operation: Forbidden")
 		os.Exit(254)
@@ -164,6 +167,18 @@ func TestArgs(t *testing.T) {
 			wantDoc:    "AWS-StartPortForwardingSessionToRemoteHost",
 			wantParams: map[string][]string{"host": {"db.example.internal"}, "portNumber": {"5432"}, "localPortNumber": {"15432"}},
 		},
+		{
+			name:       "custom document fixes the remote port",
+			spec:       core.TunnelSpec{Profile: "example", Region: "us-east-1", Target: "i-0123456789abcdef0", RemotePort: 8025, LocalPort: 18025, Document: "acme-staging-mailpit-port-forward"},
+			wantDoc:    "acme-staging-mailpit-port-forward",
+			wantParams: map[string][]string{"localPortNumber": {"18025"}},
+		},
+		{
+			name:       "custom remote-host document",
+			spec:       core.TunnelSpec{Profile: "example", Region: "ca-central-1", Target: "i-0fedcba9876543210", RemoteHost: "db.example.internal", RemotePort: 5432, LocalPort: 15432, Document: "acme-db-port-forward"},
+			wantDoc:    "acme-db-port-forward",
+			wantParams: map[string][]string{"host": {"db.example.internal"}, "portNumber": {"5432"}, "localPortNumber": {"15432"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -184,6 +199,22 @@ func TestArgs(t *testing.T) {
 				t.Fatalf("parameters = %v, want %v", got, tt.wantParams)
 			}
 		})
+	}
+}
+
+// TestArgsCustomDocumentExact pins the full command for a custom document to
+// the form developers run by hand.
+func TestArgsCustomDocumentExact(t *testing.T) {
+	got := Args(core.TunnelSpec{Profile: "example", Region: "us-east-1", Target: "i-0123456789abcdef0",
+		RemotePort: 8025, LocalPort: 18025, Document: "acme-staging-mailpit-port-forward"})
+	want := []string{
+		"--profile", "example", "--region", "us-east-1",
+		"ssm", "start-session", "--target", "i-0123456789abcdef0",
+		"--document-name", "acme-staging-mailpit-port-forward",
+		"--parameters", `{"localPortNumber":["18025"]}`,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Args =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -318,6 +349,34 @@ func TestAccessDeniedFailsWithoutReconnect(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			if n := f.calls.Load(); n != 1 {
 				t.Fatalf("command ran %d times, want 1", n)
+			}
+		})
+	}
+}
+
+func TestAccessDeniedGenericDocumentHint(t *testing.T) {
+	const base = "not allowed to start an SSM session on i-0123456789abcdef0 (missing ssm:StartSession)."
+	const admin = " Ask your AWS admin to allow it — see https://github.com/nhl4000/awsport#iam-permissions"
+	hint := " Your role may only allow specific SSM documents. If your team uses one for this port, add it to the instance tag: " +
+		"awsport:ports = <name>:5432@<document> or to port_documents in the team config — see https://github.com/nhl4000/awsport#custom-ssm-documents."
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"generic document", "", base + hint + admin},
+		{"custom document already used", "acme-port-forward", base + admin},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := newTestManager(t, Options{Reconnect: true, MaxFailures: 5}, "deniedgeneric")
+			spec := testSpec("k", "l")
+			spec.Document = tt.doc
+			if err := m.Start(spec); err != nil {
+				t.Fatal(err)
+			}
+			if s := waitStatus(t, m, spec.Key, Failed); s.Err != tt.want {
+				t.Fatalf("Err =\n%q\nwant\n%q", s.Err, tt.want)
 			}
 		})
 	}
