@@ -231,8 +231,11 @@ func discoverRegion(ctx context.Context, c regionClients, o discoverOptions) ([]
 	return out, errors.Join(ec2Err, rdsErr)
 }
 
-// discoverEC2 lists live EC2 instances with their SSM status. Without the
-// SSM status no instance is reported: all would look unreachable.
+// discoverEC2 lists live EC2 instances with their SSM status. If the SSM
+// status call fails for another reason no instance is reported (all would
+// look unreachable). If it is denied by IAM, running instances are listed as
+// connectable — opening a tunnel verifies the agent — and the
+// *PermissionError is returned alongside so the missing action is shown.
 func discoverEC2(ctx context.Context, c regionClients, o discoverOptions) ([]core.Resource, error) {
 	instances, err := c.ec2.describeInstances(ctx)
 	if err != nil {
@@ -243,15 +246,19 @@ func discoverEC2(ctx context.Context, c regionClients, o discoverOptions) ([]cor
 		return nil, nil
 	}
 
-	online, err := ssmOnline(ctx, c.ssm)
-	if err != nil {
-		return nil, err
+	online, ssmErr := ssmOnline(ctx, c.ssm)
+	var denied *PermissionError
+	if ssmErr != nil && !errors.As(ssmErr, &denied) {
+		return nil, ssmErr
 	}
 	out := make([]core.Resource, 0, len(instances))
 	for _, inst := range instances {
+		if denied != nil {
+			online = map[string]bool{inst.ID: inst.State == "running"}
+		}
 		out = append(out, ec2Resource(inst, online, o))
 	}
-	return out, nil
+	return out, ssmErr
 }
 
 // ssmOnline returns the IDs of managed instances whose SSM ping status is Online.

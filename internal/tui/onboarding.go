@@ -334,6 +334,9 @@ func (m *model) leaveOnboarding() tea.Cmd {
 
 func (m *model) onboardingKey(msg tea.KeyMsg) tea.Cmd {
 	o := &m.onb
+	if key.Matches(msg, keys.Bug) && (o.step == onbDeps || o.step == onbSSOChoice || o.step == onbFailed) {
+		return m.reportBug()
+	}
 	switch o.step {
 	case onbDeps:
 		switch {
@@ -644,7 +647,7 @@ func (m *model) onboardingHelp() helpKeys {
 	case onbManual:
 		return helpKeys{keys.NextField, bind("enter", "next/save", "enter"), bind("esc", "back", "esc")}
 	case onbFailed:
-		return helpKeys{bind("enter", "retry", "enter"), keys.Back, keys.Quit}
+		return helpKeys{bind("enter", "retry", "enter"), keys.Back, keys.Bug, keys.Quit}
 	}
 	return helpKeys{keys.ForceQuit}
 }

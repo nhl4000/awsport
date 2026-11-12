@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,13 +57,15 @@ func NeedsOnboarding(a *app.App) bool {
 // still running when it returns stay up in the background agent.
 func Run(a *app.App) error {
 	m := newModel(a)
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	g := guard(m)
+	_, err := tea.NewProgram(g, tea.WithAltScreen()).Run()
 	m.cancel()
 	n := a.Tunnels.ActiveCount()
 	a.Close()
 	if n > 0 {
 		fmt.Fprintf(os.Stderr, "awsport: %d tunnel(s) still running in the background (awsport ps lists them, awsport down --all stops them)\n", n)
 	}
+	g.repanic(err)
 	if err != nil {
 		return fmt.Errorf("run tui: %w", err)
 	}
@@ -184,9 +188,12 @@ type model struct {
 	ops   map[int]string
 	opSeq int
 	help  help.Model
+	// fullHelp shows every key in columns instead of the one-line summary.
+	fullHelp bool
 
 	flash        string
 	flashLvl     flashLevel
+	flashAt      time.Time
 	authProfiles map[string]bool // profiles whose AWS calls failed with auth errors
 	depsWarning  string
 	started      time.Time // UI start; older Up events are snapshots, not news
@@ -199,6 +206,8 @@ type model struct {
 	creds     map[string]credState
 	credSem   chan struct{}
 	resources map[string][]core.Resource
+	resAt     map[string]time.Time               // when resources[profile] was discovered
+	resDisk   map[string]bool                    // resources[profile] came from the disk cache and awaits revalidation
 	resErr    map[string]error                   // discovery failures other than missing permissions
 	resPerms  map[string][]*awsx.PermissionError // discovery calls denied by IAM, per profile
 	loading   map[string]bool
@@ -230,6 +239,8 @@ func newModel(a *app.App) *model {
 		creds:        map[string]credState{},
 		credSem:      make(chan struct{}, maxCredChecks),
 		resources:    map[string][]core.Resource{},
+		resAt:        map[string]time.Time{},
+		resDisk:      map[string]bool{},
 		resErr:       map[string]error{},
 		resPerms:     map[string][]*awsx.PermissionError{},
 		loading:      map[string]bool{},
@@ -414,9 +425,14 @@ func (m *model) checkAllCreds() tea.Cmd {
 
 // ---- status line ----
 
-func (m *model) setFlash(s string) { m.flash, m.flashLvl = s, flashOK }
+func (m *model) setFlash(s string) { m.setStatus(s, flashOK) }
 
-func (m *model) setWarn(s string) { m.flash, m.flashLvl = s, flashWarn }
+func (m *model) setWarn(s string) { m.setStatus(s, flashWarn) }
+
+// setStatus shows s in the status line until flashExpired says otherwise.
+func (m *model) setStatus(s string, lvl flashLevel) {
+	m.flash, m.flashLvl, m.flashAt = s, lvl, time.Now()
+}
 
 // setErr shows err in the status line. Errors that consist only of missing
 // IAM permissions are shown as a calm warning with the admin hint.
@@ -425,7 +441,7 @@ func (m *model) setErr(err error) {
 		m.setWarn(permissionNotice(perms))
 		return
 	}
-	m.flash, m.flashLvl = oneLine(err.Error()), flashError
+	m.setStatus(oneLine(err.Error()), flashError)
 }
 
 // noteAuth records profiles whose calls failed due to expired credentials.
@@ -475,8 +491,14 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 	case listMsg:
 		return m.routeListMsg(msg)
 	case tickMsg:
-		if m.screen() == scrDashboard {
+		if m.flash != "" && flashExpired(m.flashLvl, m.flashAt, time.Now()) {
+			m.flash = ""
+		}
+		switch m.screen() {
+		case scrDashboard:
 			return tea.Batch(m.rebuildDashboard(), m.tick())
+		case scrResources:
+			m.lists[scrResources].Title = m.resourcesTitle()
 		}
 		return m.tick()
 	case eventMsg:
@@ -512,6 +534,15 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 			m.setFlash("shell session closed")
 		}
 		return nil
+	case bugDoneMsg:
+		var exit *exec.ExitError
+		switch {
+		case errors.As(msg.err, &exit):
+			m.setWarn("bug report not filed (awsport bug exited with status " + strconv.Itoa(exit.ExitCode()) + ")")
+		case msg.err != nil:
+			m.setErr(fmt.Errorf("awsport bug: %w", msg.err))
+		}
+		return nil
 	case loginDoneMsg:
 		return m.onLoginDone(msg)
 	case restartedMsg:
@@ -520,14 +551,14 @@ func (m *model) update(msg tea.Msg) tea.Cmd {
 		} else if len(msg.keys) > 0 {
 			m.setFlash(fmt.Sprintf("logged in; restarting %d tunnel(s)", len(msg.keys)))
 		}
-		return m.rebuildDashboard()
+		return m.rebuildTunnelViews()
 	case tunnelOpMsg:
 		if msg.err != nil {
 			m.setErr(fmt.Errorf("%s %s: %w", msg.verb, msg.label, msg.err))
 		} else {
 			m.setFlash(fmt.Sprintf("%s %s", msg.verb, msg.label))
 		}
-		return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
+		return m.rebuildTunnelViews()
 	case groupSavedMsg:
 		return m.onGroupSaved(msg)
 	case groupStartedMsg:
@@ -592,9 +623,27 @@ func (m *model) routeListMsg(msg listMsg) tea.Cmd {
 	}
 }
 
-// setItems replaces a list's items; filtering follow-ups are tagged.
+// setItems replaces a list's items, keeping the cursor on the same key when
+// it is still listed; filtering follow-ups are tagged.
 func (m *model) setItems(id screen, items []list.Item) tea.Cmd {
-	return tagList(id, m.lists[id].SetItems(items))
+	l := m.lists[id]
+	prev, hadPrev := selectedKey(l)
+	cmd := l.SetItems(items)
+	if hadPrev && l.FilterState() == list.Unfiltered {
+		if i := itemIndex(items, prev); i >= 0 {
+			l.Select(i)
+		}
+	}
+	return tagList(id, cmd)
+}
+
+func itemIndex(items []list.Item, k string) int {
+	for i, it := range items {
+		if x, ok := it.(item); ok && x.key == k {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m *model) onKey(msg tea.KeyMsg) tea.Cmd {
@@ -625,6 +674,11 @@ func (m *model) onKey(msg tea.KeyMsg) tea.Cmd {
 		return m.rebuildGroups()
 	case key.Matches(msg, keys.Login):
 		return m.relogin()
+	case key.Matches(msg, keys.Help):
+		m.fullHelp = !m.fullHelp
+		return nil
+	case key.Matches(msg, keys.Bug):
+		return m.reportBug()
 	}
 	var handled bool
 	var cmd tea.Cmd
@@ -688,16 +742,21 @@ func (m *model) onEvent(ev tunnel.Event) tea.Cmd {
 	label := ev.Session.Spec.Label
 	switch ev.Session.Status {
 	case tunnel.AuthExpired:
-		m.flash, m.flashLvl = fmt.Sprintf("%s: credentials expired, press L to log in again", label), flashError
+		m.setStatus(fmt.Sprintf("%s: credentials expired, press L to log in again", label), flashError)
 	case tunnel.Failed:
-		m.flash, m.flashLvl = fmt.Sprintf("%s failed: %s", label, ev.Session.Err), flashError
+		m.setStatus(fmt.Sprintf("%s failed: %s", label, ev.Session.Err), flashError)
 	case tunnel.Up:
 		// Snapshots of tunnels that came up before this UI started are not news.
 		if !ev.Session.Since.Before(m.started) {
 			m.setFlash(fmt.Sprintf("%s is up on %s", label, linkAddr(ev.Session.Spec)))
 		}
 	}
-	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
+	return m.rebuildTunnelViews()
+}
+
+// rebuildTunnelViews refreshes every list that shows tunnel state.
+func (m *model) rebuildTunnelViews() tea.Cmd {
+	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts(), m.rebuildResources(), m.rebuildProfiles(), m.rebuildGroups())
 }
 
 // checkResumed looks for tunnels kept running by the agent since an earlier
@@ -716,7 +775,7 @@ func (m *model) checkResumed() tea.Cmd {
 func (m *model) onResumed(msg resumedMsg) tea.Cmd {
 	var parts []string
 	if msg.n > 0 {
-		parts = append(parts, fmt.Sprintf("%d tunnel(s) still running in the background", msg.n))
+		parts = append(parts, fmt.Sprintf("%s still running in the background — t shows them", plural(msg.n, "tunnel")))
 	}
 	if msg.warning != "" {
 		parts = append(parts, oneLine(msg.warning))
@@ -724,11 +783,12 @@ func (m *model) onResumed(msg resumedMsg) tea.Cmd {
 	if len(parts) == 0 {
 		return nil
 	}
-	m.flash, m.flashLvl = strings.Join(parts, "; "), flashOK
+	lvl := flashOK
 	if msg.warning != "" {
-		m.flashLvl = flashError
+		lvl = flashError
 	}
-	return tea.Batch(m.rebuildDashboard(), m.rebuildPorts())
+	m.setStatus(strings.Join(parts, "; "), lvl)
+	return m.rebuildTunnelViews()
 }
 
 // ---- login ----
@@ -854,24 +914,107 @@ func (m *model) View() string {
 	case m.screen() == scrOnboarding:
 		body = m.onboardingView()
 	default:
-		body = m.activeList().View()
+		body = m.listView()
 	}
 	parts = append(parts, lipgloss.NewStyle().Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(bodyStyle.Render(body)))
 	parts = append(parts, m.footerView())
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
+// headerView is the title bar with the navigation stack as breadcrumbs,
+// e.g. "profiles › acme-dev › web-app".
 func (m *model) headerView() string {
-	titles := map[screen]string{
-		scrOnboarding: "setup",
-		scrProfiles:   "profiles",
-		scrResources:  "resources",
-		scrPorts:      "ports",
-		scrBastion:    "bastion",
-		scrDashboard:  "tunnels",
-		scrGroups:     "groups",
+	crumbs := make([]string, 0, len(m.stack))
+	for i, s := range m.stack {
+		c := m.crumb(s)
+		if i == len(m.stack)-1 {
+			c = boldStyle.Render(c)
+		} else {
+			c = subtleStyle.Render(c)
+		}
+		crumbs = append(crumbs, c)
 	}
-	return titleBarStyle.Render("awsport") + subtleStyle.Render(" · "+titles[m.screen()]+" · unofficial")
+	line := titleBarStyle.Render("awsport") + " " + strings.Join(crumbs, subtleStyle.Render(" › ")) + subtleStyle.Render(" · unofficial")
+	return lipgloss.NewStyle().MaxWidth(max(m.width, 20)).Render(line)
+}
+
+func (m *model) crumb(s screen) string {
+	switch s {
+	case scrOnboarding:
+		return "setup"
+	case scrProfiles:
+		return "profiles"
+	case scrResources:
+		return m.cur.Name
+	case scrPorts:
+		if m.curRes.Name != "" {
+			return m.curRes.Name
+		}
+		return m.curRes.ID
+	case scrBastion:
+		return "pick bastion"
+	case scrDashboard:
+		return "tunnels"
+	case scrGroups:
+		return "groups"
+	}
+	return ""
+}
+
+// listView renders the current list, or its title and an explanation when
+// the list is empty.
+func (m *model) listView() string {
+	l := m.activeList()
+	if len(l.Items()) > 0 || l.FilterState() != list.Unfiltered {
+		return l.View()
+	}
+	text := m.emptyText()
+	if text == "" {
+		return l.View()
+	}
+	title := l.Styles.TitleBar.Render(l.Styles.Title.Render(l.Title))
+	return title + "\n\n" + lipgloss.NewStyle().Width(max(m.width-8, 20)).PaddingLeft(2).Render(text)
+}
+
+// emptyText explains an empty list and what to do next.
+func (m *model) emptyText() string {
+	switch m.screen() {
+	case scrProfiles:
+		return fmt.Sprintf("No AWS profiles in %s.\n\nPress o to set up SSO or import a team config, or r to reload.", awsx.DisplayPath(awsx.ConfigFilePath()))
+	case scrResources:
+		return m.resourcesEmptyText()
+	case scrDashboard:
+		return "No tunnels running.\n\n" +
+			"To start one, open a profile (esc), pick a resource and press enter on a port.\n" +
+			"Press g to start a saved group."
+	case scrGroups:
+		return "No groups yet.\n\n" +
+			"A group starts several tunnels at once. On the tunnels screen (t), mark tunnels with space and press s to save them.\n" +
+			"Groups from a team config show up here too."
+	case scrBastion:
+		return "Nothing to pick. Press esc to go back."
+	}
+	return ""
+}
+
+func (m *model) resourcesEmptyText() string {
+	name := m.cur.Name
+	regions := strings.Join(awsx.Regions(m.cur, m.a.Cfg.Regions), ", ")
+	err := m.resErr[name]
+	switch {
+	case m.loading[name]:
+		return m.spin.View() + fmt.Sprintf(" Discovering EC2 instances and RDS databases in %s (%s)…", name, regions)
+	case err != nil && awsx.IsAuthError(err):
+		return "Nothing to show until you log in again (L)."
+	case err != nil:
+		return "Can't list resources (error above).\n\nPress r to retry."
+	case hiddenCount(m.resources[name]) > 0:
+		return fmt.Sprintf("No connectable resources.\n\n%d unreachable resource(s) are hidden; press a to show them and why.", hiddenCount(m.resources[name]))
+	case len(m.resPerms[name]) > 0:
+		return "Nothing this role is allowed to list (see above).\n\nPress r to retry after your permissions change."
+	}
+	return fmt.Sprintf("No EC2 instances or RDS databases found in %s (%s).\n\n"+
+		"Wrong region? Set regions in the awsport config or the profile's region. Press r to refresh.", name, regions)
 }
 
 // preamble is optional context above the current screen's list: discovery
@@ -885,7 +1028,11 @@ func (m *model) preamble() string {
 		if panel := permissionPanel(m.resPerms[m.cur.Name], width); panel != "" {
 			parts = append(parts, panel)
 		}
-		if err := m.resErr[m.cur.Name]; err != nil {
+		switch err := m.resErr[m.cur.Name]; {
+		case err == nil:
+		case awsx.IsAuthError(err):
+			parts = append(parts, errStyle.Render(fmt.Sprintf("✗ The login for %s expired. Press L to log in again; resources reload afterwards.", m.cur.Name)))
+		default:
 			parts = append(parts, errStyle.Render(oneLine(err.Error())))
 		}
 		s = strings.Join(parts, "\n")
@@ -904,10 +1051,13 @@ func (m *model) preamble() string {
 		}
 	case scrBastion:
 		if m.bastion != nil {
-			s = fmt.Sprintf("%s:%d needs a bastion in %s/%s. No instance is tagged %s=true or named %q.",
+			s = fmt.Sprintf("%s:%d needs a bastion in %s/%s. No SSM-online instance is tagged %s=true or named %q.",
 				m.pending.r.Name, m.pending.remote, m.bastion.Profile, m.bastion.Region, core.TagBastion, core.DefaultBastionName)
 			if len(m.bastion.Candidates) == 0 {
 				s += "\n" + errStyle.Render("No running SSM-online instance found; start one or tag a bastion, then retry.")
+				if ssmDenied(m.resPerms[m.bastion.Profile]) {
+					s += "\n" + warnStyle.Render("SSM agent status couldn't be checked (missing ssm:DescribeInstanceInformation), so no instance counts as online.")
+				}
 			} else {
 				s += " Your choice is remembered."
 			}
@@ -973,10 +1123,22 @@ func (m *model) footerView() string {
 	n := m.a.Tunnels.ActiveCount()
 	status := subtleStyle.Render("○ no active tunnels")
 	if n > 0 {
-		status = okStyle.Render(fmt.Sprintf("● %d active tunnel(s)", n))
+		status = okStyle.Render("● " + plural(n, "active tunnel"))
 	}
+	km := m.helpKeys()
+	sh, isScreen := km.(screenHelp)
+	if isScreen && m.fullHelp {
+		m.help.ShowAll = true
+		m.help.Width = width
+		lines = append(lines, status, m.help.View(sh))
+		return strings.Join(lines, "\n")
+	}
+	m.help.ShowAll = false
 	m.help.Width = width - lipgloss.Width(status) - 3
-	lines = append(lines, status+"   "+m.help.View(m.helpKeys()))
+	if isScreen {
+		km = sh.fit(m.help.Width)
+	}
+	lines = append(lines, status+"   "+m.help.View(km))
 	return strings.Join(lines, "\n")
 }
 
@@ -1002,24 +1164,46 @@ func (m *model) helpKeys() help.KeyMap {
 	if m.input != nil {
 		return helpKeys{bind("enter", "confirm", "enter"), bind("esc", "cancel", "esc")}
 	}
-	global := []key.Binding{keys.Dashboard, keys.Groups, keys.Login, keys.Quit}
-	switch m.screen() {
-	case scrOnboarding:
+	if m.screen() == scrOnboarding {
 		return m.onboardingHelp()
-	case scrProfiles:
-		return helpKeys(append([]key.Binding{keys.Enter, keys.Filter, bind("r", "reload", "r"), keys.Onboard}, global...))
-	case scrResources:
-		return helpKeys(append([]key.Binding{keys.Enter, keys.Filter, keys.ShowAll, keys.AddPort, keys.Shell, keys.Refresh, keys.Back}, global...))
-	case scrPorts:
-		return helpKeys(append([]key.Binding{bind("enter", "start/stop", "enter"), keys.Stop, keys.Open, keys.Copy, keys.AddPort, keys.Back}, global...))
-	case scrBastion:
-		return helpKeys{bind("enter", "use as bastion", "enter"), keys.Back, keys.Quit}
-	case scrDashboard:
-		return helpKeys{bind("enter", "stop/restart", "enter"), keys.Select, keys.SaveGroup, keys.Copy, keys.Open, keys.Stop, keys.Restart, keys.Login, keys.Groups, keys.Back, keys.Quit}
-	case scrGroups:
-		return helpKeys{bind("enter", "start group", "enter"), keys.Delete, keys.Filter, keys.Dashboard, keys.Back, keys.Quit}
 	}
-	return helpKeys(global)
+	l := m.activeList()
+	if l.SettingFilter() {
+		return helpKeys{bind("enter", "apply filter", "enter"), bind("esc", "cancel", "esc")}
+	}
+	back := keys.Back
+	var clear []key.Binding
+	if l.FilterState() == list.FilterApplied {
+		back = bind("esc", "clear filter", "esc")
+		clear = []key.Binding{back}
+	}
+	empty := len(l.Items()) == 0
+	switch m.screen() {
+	case scrProfiles:
+		return screenHelp{keys: append(clear, bind("enter", "open", "enter"), keys.Filter, keys.Dashboard, bind("r", "reload", "r"), keys.Onboard)}
+	case scrResources:
+		return screenHelp{keys: []key.Binding{bind("enter", "open", "enter"), back, keys.Refresh, keys.Filter, keys.ShowAll, keys.AddPort, keys.Shell}}
+	case scrPorts:
+		return screenHelp{keys: []key.Binding{bind("enter", "start/stop", "enter"), keys.Copy, back, keys.Open, keys.Stop, keys.AddPort, keys.Shell}}
+	case scrBastion:
+		if empty {
+			return screenHelp{keys: []key.Binding{back}}
+		}
+		return screenHelp{keys: []key.Binding{bind("enter", "use as bastion", "enter"), back}}
+	case scrDashboard:
+		self := []key.Binding{keys.Dashboard}
+		if empty {
+			return screenHelp{keys: []key.Binding{back, keys.Groups}, omit: self}
+		}
+		return screenHelp{keys: []key.Binding{bind("enter", "stop/restart", "enter"), keys.Select, keys.SaveGroup, back, keys.Copy, keys.Open, keys.Stop, keys.Restart}, omit: self}
+	case scrGroups:
+		self := []key.Binding{keys.Groups}
+		if empty && clear == nil {
+			return screenHelp{keys: []key.Binding{back, keys.Dashboard}, omit: self}
+		}
+		return screenHelp{keys: []key.Binding{bind("enter", "start group", "enter"), keys.Delete, back, keys.Filter}, omit: self}
+	}
+	return screenHelp{}
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
