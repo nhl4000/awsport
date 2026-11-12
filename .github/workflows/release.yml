@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - "v*"
-  # Dry run on any branch: the same build as a release, packaged but not published.
+  # Dry run from any branch or tag: the release build and archives, never published.
   workflow_dispatch:
 
 permissions:
@@ -36,6 +36,6 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
+          args: release --clean ${{ github.event_name == 'workflow_dispatch' && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
