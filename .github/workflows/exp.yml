@@ -9,67 +9,30 @@ permissions:
   contents: read
 
 jobs:
-  setup:
+  unzip:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
-        variant: [v7, toolcache, manual]
-        include:
-          - os: windows-latest
-            variant: ddrive
-          - os: windows-latest
-            variant: nodefender
-          - os: windows-latest
-            variant: nodefender-toolcache
-    runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} ${{ matrix.variant }}
+        tool: [7z, bsdtar, unzip, pwsh]
+    runs-on: windows-latest
+    name: windows unzip ${{ matrix.tool }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
-      - if: startsWith(matrix.variant, 'nodefender')
-        shell: pwsh
-        run: Set-MpPreference -DisableRealtimeMonitoring $true
-      - if: matrix.variant == 'ddrive'
-        run: |
-          echo "GOCACHE=D:\\gocache" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=D:\\gomodcache" >> "$GITHUB_ENV"
-      - if: endsWith(matrix.variant, 'toolcache')
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.tool_cache }}/go/1.27.4
-          key: exp-toolchain-${{ runner.os }}-${{ runner.arch }}-go1.27.4
-      - if: matrix.variant != 'manual'
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: manual install
-        if: matrix.variant == 'manual'
-        run: |
-          set -x
-          os=$(echo "$RUNNER_OS" | tr A-Z a-z); [ "$os" = macos ] && os=darwin
-          arch=$(echo "$RUNNER_ARCH" | tr A-Z a-z); [ "$arch" = x64 ] && arch=amd64
+      - run: |
           cd "$RUNNER_TEMP"
-          if [ "$os" = windows ]; then
-            time curl -fsSLo go.zip "https://go.dev/dl/go1.27.4.$os-$arch.zip"
-            time 7z x -bd -y go.zip >/dev/null
-          else
-            time curl -fsSL "https://go.dev/dl/go1.27.4.$os-$arch.tar.gz" | tar xz
-          fi
-          echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
-          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
-      - if: matrix.variant == 'manual'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/Library/Caches/go-build
-            ~/AppData/Local/go-build
-            ~/go/pkg/mod
-          key: exp-manual-${{ runner.os }}-${{ hashFiles('go.sum') }}
-      - run: go version
-      - run: time go vet ./...
-      - run: time go test ./...
+          which jq sha256sum unzip 7z || true
+          curl -fsSLo go.zip https://go.dev/dl/go1.27.4.windows-amd64.zip
+          mkdir out
+          case "${{ matrix.tool }}" in
+            7z) time 7z x -bd -y -oout go.zip >/dev/null ;;
+            bsdtar) time /c/Windows/System32/tar.exe -xf go.zip -C out ;;
+            unzip) time unzip -q go.zip -d out ;;
+            pwsh) time pwsh -NoProfile -Command 'Expand-Archive -Path go.zip -DestinationPath out' ;;
+          esac
+          out/go/bin/go version
+  tools:
+    runs-on: macos-latest
+    steps:
+      - run: which jq sha256sum shasum || true
