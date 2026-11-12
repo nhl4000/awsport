@@ -15,24 +15,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Same flags as the GoReleaser builds, so `go test` reuses their compiled
-      # packages from the build cache (see the goreleaser-check job in ci.yml).
+      # packages from the build cache.
       CGO_ENABLED: "0"
       GOFLAGS: -trimpath
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: false
-      # Tag runs can read caches saved on the default branch: the goreleaser-check
-      # job in ci.yml saves this one on pushes to main.
+      - id: go
+        uses: ./.github/actions/setup-go
+      # Saved by the goreleaser-check job in ci.yml on pushes to main; tag runs
+      # can restore caches from the default branch.
       - uses: actions/cache/restore@v6
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
+          path: ${{ steps.go.outputs.cache-path }}
           key: goreleaser-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', '.goreleaser.yaml') }}
           restore-keys: goreleaser-${{ runner.os }}-
       - run: go test ./...

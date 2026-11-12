@@ -15,6 +15,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Build caches are saved by pushes to main only, one entry per dependency set
+# (keys hash go.mod/go.sum). Pull requests and release tags restore main's
+# entries; a dependency change falls back to the previous entry via restore-keys.
 jobs:
   test:
     strategy:
@@ -27,30 +30,35 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - id: go
+        uses: ./.github/actions/setup-go
+      - id: cache
+        uses: actions/cache/restore@v6
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          path: ${{ steps.go.outputs.cache-path }}
+          key: go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-test-${{ runner.os }}-${{ runner.arch }}-
       # vet type-checks every package, so a separate `go build` adds nothing.
       - run: go vet ./...
       - run: go test ./...
+      - if: github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go.outputs.cache-path }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
-  # Builds every release target on each PR, so a broken cross-compile shows up
-  # before tagging. Its build cache is what the release workflow starts from.
+  # Builds every release target, so a broken cross-compile shows up before
+  # tagging. The release workflow starts from this job's build cache.
   goreleaser-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: false
+      - id: go
+        uses: ./.github/actions/setup-go
       - id: cache
         uses: actions/cache/restore@v6
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
+          path: ${{ steps.go.outputs.cache-path }}
           key: goreleaser-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', '.goreleaser.yaml') }}
           restore-keys: goreleaser-${{ runner.os }}-
       - uses: goreleaser/goreleaser-action@v7
@@ -60,12 +68,8 @@ jobs:
           install-only: true
       - run: goreleaser check
       - run: goreleaser build --snapshot --clean
-      # Saved from main only: PRs and release tags restore it, and one entry per
-      # dependency set keeps the cache small.
       - if: github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
+          path: ${{ steps.go.outputs.cache-path }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
