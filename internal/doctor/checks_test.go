@@ -59,11 +59,6 @@ func TestTokenCheck(t *testing.T) {
 			writeToken(t, dir, "a.json", testStartURL, now.Add(10*time.Minute))
 			writeToken(t, dir, "b.json", testStartURL+"/", now.Add(26*time.Hour))
 		}, status: OK, title: "signed in to SSO; expires in 26h00m (Mar 5 12:00 UTC)"},
-		{name: "cache unreadable", setup: func(t *testing.T, dir string) {
-			if err := os.WriteFile(dir, []byte("not a dir"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}, status: Fail, title: "can't read the SSO token cache", fixPrefix: "fix it"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

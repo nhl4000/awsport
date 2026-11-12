@@ -7,7 +7,28 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/nhl4000/awsport/internal/config"
 )
+
+// Unix-only: a file where the cache directory should be is "not a directory"
+// here, while Windows reports it as missing (treated as not signed in).
+func TestTokenCheckCacheUnreadable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.WriteFile(dir, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := tokenCheck(ssoInputs{
+		cfg:         &config.Config{SSO: config.SSO{StartURL: testStartURL, Region: "us-east-1"}},
+		cacheDir:    dir,
+		now:         time.Now(),
+		writeAdvice: func(p string) (string, string) { return p, "fix it" },
+	})
+	if c.Status != Fail || !strings.HasPrefix(c.Title, "can't read the SSO token cache") || c.Fix != "fix it" {
+		t.Fatalf("got %+v", c)
+	}
+}
 
 func TestWritableCheck(t *testing.T) {
 	if os.Geteuid() == 0 {
