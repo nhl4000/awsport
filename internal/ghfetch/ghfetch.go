@@ -139,8 +139,8 @@ type Client struct {
 // as plain-language errors that say how to fix access. The caller closes
 // the returned body.
 func (c *Client) Open(ctx context.Context, f File) (io.ReadCloser, error) {
-	tok, src := c.token(ctx)
-	u := c.base() + "/repos/" + url.PathEscape(f.Owner) + "/" + url.PathEscape(f.Repo) + "/contents/" + escapePath(f.Path)
+	tok, src := c.Token(ctx)
+	u := c.APIBase() + "/repos/" + url.PathEscape(f.Owner) + "/" + url.PathEscape(f.Repo) + "/contents/" + escapePath(f.Path)
 	if f.Ref != "" {
 		u += "?ref=" + url.QueryEscape(f.Ref)
 	}
@@ -220,7 +220,7 @@ func rateReset(resp *http.Response) time.Time {
 func (c *Client) login(ctx context.Context, tok string) string {
 	ctx, cancel := context.WithTimeout(ctx, ghTimeout)
 	defer cancel()
-	resp, err := c.get(ctx, c.base()+"/user", "application/vnd.github+json", tok)
+	resp, err := c.get(ctx, c.APIBase()+"/user", "application/vnd.github+json", tok)
 	if err != nil {
 		return ""
 	}
@@ -255,8 +255,10 @@ func (c *Client) get(ctx context.Context, u, accept, tok string) (*http.Response
 	return hc.Do(req)
 }
 
-// token returns the first available token and a description of its source.
-func (c *Client) token(ctx context.Context) (tok, src string) {
+// Token returns the first available GitHub token, from $GITHUB_TOKEN,
+// $GH_TOKEN or `gh auth token` (5s timeout), and a description of its
+// source; both are "" when there is none.
+func (c *Client) Token(ctx context.Context) (tok, src string) {
 	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
 		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
 			return v, env
@@ -272,7 +274,9 @@ func (c *Client) token(ctx context.Context) (tok, src string) {
 	return "", ""
 }
 
-func (c *Client) base() string {
+// APIBase is the API base URL without a trailing slash: BaseURL, else
+// $AWSPORT_GITHUB_API, else DefaultAPI.
+func (c *Client) APIBase() string {
 	b := c.BaseURL
 	if b == "" {
 		b = os.Getenv(EnvAPI)

@@ -34,7 +34,7 @@ func (m *model) rebuildDashboard() tea.Cmd {
 		}
 		items = append(items, item{
 			title: fmt.Sprintf("%s %s %s", box, statusGlyph(s.Status), s.Spec.Label),
-			desc:  sessionDetail(s, now),
+			desc:  s.Spec.Profile + " · " + sessionDetail(s, now),
 			key:   s.Spec.Key,
 		})
 	}
@@ -216,12 +216,8 @@ func (m *model) saveGroup(name string, specs []core.TunnelSpec) tea.Cmd {
 
 func (m *model) onGroupSaved(msg groupSavedMsg) tea.Cmd {
 	for pname, rs := range msg.discovered {
-		if len(rs) == 0 {
-			continue
-		}
-		m.resources[pname] = rs
-		for _, r := range rs {
-			m.known[r.Ref()] = r
+		if len(rs) > 0 {
+			m.storeResources(pname, rs, time.Now())
 		}
 	}
 	if msg.err != nil {
@@ -241,9 +237,14 @@ func (m *model) onGroupSaved(msg groupSavedMsg) tea.Cmd {
 
 func (m *model) rebuildGroups() tea.Cmd {
 	gs := m.a.Groups()
+	sessions := m.a.Tunnels.Sessions()
 	items := make([]list.Item, 0, len(gs))
 	for _, g := range gs {
-		items = append(items, item{title: g.Name, desc: groupSummary(g), key: g.Name})
+		desc := groupSummary(g)
+		if up := groupUp(g, sessions); up > 0 {
+			desc = fmt.Sprintf("● %d/%d up · %s", up, len(g.Members), desc)
+		}
+		items = append(items, item{title: g.Name, desc: desc, key: g.Name})
 	}
 	return m.setItems(scrGroups, items)
 }
@@ -280,7 +281,7 @@ func (m *model) onGroupStarted(msg groupStartedMsg) tea.Cmd {
 	case awsx.WithoutPermissionErrors(joined) == nil:
 		m.setWarn(fmt.Sprintf("%s, %d not allowed:\n%s", text, len(msg.errs), permissionNotice(awsx.PermissionErrors(joined))))
 	default:
-		m.flash, m.flashLvl = fmt.Sprintf("%s, %d failed: %s", text, len(msg.errs), errorsSummary(msg.errs)), flashError
+		m.setStatus(fmt.Sprintf("%s, %d failed: %s", text, len(msg.errs), errorsSummary(msg.errs)), flashError)
 	}
 	m.goTo(scrDashboard)
 	return m.rebuildDashboard()

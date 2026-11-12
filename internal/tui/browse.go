@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -19,19 +20,23 @@ import (
 // ---- profiles ----
 
 func (m *model) rebuildProfiles() tea.Cmd {
+	counts := profileTunnels(m.a.Tunnels.Sessions())
 	items := make([]list.Item, 0, len(m.profiles))
 	for _, p := range m.profiles {
 		items = append(items, item{
 			title: fmt.Sprintf("%s  [%s]", p.Name, kindBadge(p.Kind)),
-			desc:  m.profileDesc(p),
+			desc:  m.profileDesc(p, counts[p.Name]),
 			key:   p.Name,
 		})
 	}
 	return m.setItems(scrProfiles, items)
 }
 
-func (m *model) profileDesc(p core.Profile) string {
+func (m *model) profileDesc(p core.Profile, tunnels int) string {
 	var parts []string
+	if tunnels > 0 {
+		parts = append(parts, "● "+plural(tunnels, "tunnel"))
+	}
 	if p.AccountID != "" {
 		parts = append(parts, p.AccountID)
 	}
@@ -104,6 +109,13 @@ func (m *model) profilesKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	return false, nil
 }
 
+// resRefreshAfter is how old shown resources may get before opening the
+// profile again rediscovers them in the background.
+const resRefreshAfter = 2 * time.Minute
+
+// openProfile shows p's resources: from this session, else from the disk
+// cache of an earlier run, revalidating in the background when they are
+// from disk or older than resRefreshAfter.
 func (m *model) openProfile(p core.Profile) tea.Cmd {
 	if m.cur.Name != p.Name {
 		m.lists[scrResources].ResetFilter()
@@ -111,11 +123,32 @@ func (m *model) openProfile(p core.Profile) tea.Cmd {
 	}
 	m.cur = p
 	m.goTo(scrResources)
-	cmd := m.rebuildResources()
-	if _, cached := m.resources[p.Name]; !cached && !m.loading[p.Name] {
-		cmd = tea.Batch(cmd, m.discover(p))
+	if _, ok := m.resources[p.Name]; !ok {
+		if rs, at, ok := m.a.CachedDiscovery(p); ok {
+			m.storeResources(p.Name, rs, at)
+			m.resDisk[p.Name] = true
+		}
 	}
-	return cmd
+	_, have := m.resources[p.Name]
+	if m.loading[p.Name] || (have && !m.resDisk[p.Name] && time.Since(m.resAt[p.Name]) < resRefreshAfter) {
+		return m.rebuildResources()
+	}
+	return m.discover(p)
+}
+
+// storeResources records a discovery result for profile made at `at`.
+func (m *model) storeResources(profile string, rs []core.Resource, at time.Time) {
+	m.resources[profile] = rs
+	m.resAt[profile] = at
+	delete(m.resDisk, profile)
+	for _, r := range rs {
+		m.known[r.Ref()] = r
+	}
+	if m.curRes.Profile == profile {
+		if r, ok := m.known[m.curRes.Ref()]; ok {
+			m.curRes = r
+		}
+	}
 }
 
 // ---- resources ----
@@ -146,15 +179,7 @@ func (m *model) onResources(msg resourcesMsg) tea.Cmd {
 		delete(m.authProfiles, msg.profile)
 	}
 	if rest == nil || len(msg.rs) > 0 {
-		m.resources[msg.profile] = msg.rs
-		for _, r := range msg.rs {
-			m.known[r.Ref()] = r
-		}
-		if m.curRes.Profile == msg.profile {
-			if r, ok := m.known[m.curRes.Ref()]; ok {
-				m.curRes = r
-			}
-		}
+		m.storeResources(msg.profile, msg.rs, time.Now())
 	}
 	if rest == nil && m.cur.Name == msg.profile {
 		text := fmt.Sprintf("%s: %d resource(s)", msg.profile, len(msg.rs))
@@ -169,21 +194,45 @@ func (m *model) onResources(msg resourcesMsg) tea.Cmd {
 
 func (m *model) rebuildResources() tea.Cmd {
 	l := m.lists[scrResources]
-	rs := m.resources[m.cur.Name]
-	title := "Resources · " + m.cur.Name
-	if n := hiddenCount(rs); n > 0 && !m.showAll {
-		title += fmt.Sprintf(" · %d unreachable hidden (a)", n)
-	}
-	if m.loading[m.cur.Name] {
-		title += " · discovering…"
-	}
-	l.Title = title
-	vis := visibleResources(rs, m.showAll)
+	l.Title = m.resourcesTitle()
+	byRef := activeByRef(m.a.Tunnels.Sessions())
+	vis := visibleResources(m.resources[m.cur.Name], m.showAll)
 	items := make([]list.Item, 0, len(vis))
 	for _, r := range vis {
-		items = append(items, item{title: resourceTitle(r), desc: resourceDesc(r), key: r.Ref()})
+		desc := resourceDesc(r)
+		if note := tunnelsNote(r, byRef[r.Ref()]); note != "" {
+			if r.Kind == core.KindRDS && rdsActive(byRef[r.Ref()]) {
+				note += " · enter stops it"
+			}
+			desc = note + " · " + desc
+		}
+		items = append(items, item{title: resourceTitle(r), desc: desc, key: r.Ref()})
 	}
 	return m.setItems(scrResources, items)
+}
+
+// resourcesTitle names the profile and says how fresh the list is.
+func (m *model) resourcesTitle() string {
+	name := m.cur.Name
+	rs, have := m.resources[name]
+	title := "Resources · " + name
+	if n := hiddenCount(rs); n > 0 && !m.showAll {
+		title += fmt.Sprintf(" · +%d unreachable (a)", n)
+	}
+	switch {
+	case m.loading[name] && have:
+		title += " · cached " + humanDuration(time.Since(m.resAt[name])) + " ago, refreshing…"
+	case m.loading[name]:
+		title += " · discovering…"
+	case have && time.Since(m.resAt[name]) >= 10*time.Second:
+		title += " · cached " + humanDuration(time.Since(m.resAt[name])) + " ago"
+	}
+	return title
+}
+
+// rdsActive reports whether an RDS row's single tunnel is active.
+func rdsActive(sessions []tunnel.Session) bool {
+	return len(sessions) == 1 && tunnel.IsActive(sessions[0].Status)
 }
 
 func resourceTitle(r core.Resource) string {
@@ -264,6 +313,10 @@ func (m *model) resourcesKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		if r.Kind == core.KindRDS {
+			s, exists := m.a.Tunnels.Get(r.TunnelKey(r.Port))
+			if portAction(s, exists) == actStop {
+				return true, m.stopTunnel(s.Spec)
+			}
 			return true, m.connect(r, r.Port)
 		}
 		m.curRes = r

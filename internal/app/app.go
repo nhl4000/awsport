@@ -42,6 +42,7 @@ type App struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cacheEntry // "profile/region" -> resources
+	disk    *diskCache            // last full discovery per profile, across processes
 
 	connectMu sync.Mutex // serializes port assignment + start
 }
@@ -77,6 +78,7 @@ func New() (*App, error) {
 		AWS:     awsx.NewDiscoverer(),
 		AWSPath: awsPath,
 		cache:   map[string]cacheEntry{},
+		disk:    newDiskCache(),
 	}, nil
 }
 
@@ -104,10 +106,16 @@ func (a *App) Profile(name string) (core.Profile, error) {
 }
 
 // Discover runs a fresh discovery of every configured region of p and
-// refreshes the discovery cache. Partial results are returned together with
-// the aggregated error.
+// refreshes the discovery caches. Partial results are returned together with
+// the aggregated error; results whose only problem is denied permissions are
+// still saved for CachedDiscovery.
 func (a *App) Discover(ctx context.Context, p core.Profile) ([]core.Resource, error) {
-	return a.discover(ctx, p, awsx.Regions(p, a.Cfg.Regions))
+	regions := awsx.Regions(p, a.Cfg.Regions)
+	res, err := a.discover(ctx, p, regions)
+	if len(regions) > 0 && awsx.WithoutPermissionErrors(err) == nil {
+		a.disk.put(p.Name, diskEntry{At: time.Now(), Regions: regions, Resources: res})
+	}
+	return res, err
 }
 
 func (a *App) discover(ctx context.Context, p core.Profile, regions []string) ([]core.Resource, error) {
@@ -624,6 +632,7 @@ func (a *App) SyncSSOProfiles(ctx context.Context) (int, error) {
 	a.cacheMu.Lock()
 	a.cache = map[string]cacheEntry{}
 	a.cacheMu.Unlock()
+	a.disk.clear()
 	return len(profiles), nil
 }
 

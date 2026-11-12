@@ -443,3 +443,111 @@ func missingActions(perms []*awsx.PermissionError) string {
 	}
 	return "missing " + strings.Join(actions, ", ")
 }
+
+// Status-line lifetimes: confirmations fade quickly, problems stay longer.
+const (
+	flashTTL    = 6 * time.Second
+	flashErrTTL = 20 * time.Second
+)
+
+// flashExpired reports whether a status message of lvl shown at `at` should
+// be cleared at now.
+func flashExpired(lvl flashLevel, at, now time.Time) bool {
+	ttl := flashTTL
+	if lvl != flashOK {
+		ttl = flashErrTTL
+	}
+	return now.Sub(at) >= ttl
+}
+
+// plural is "1 tunnel" / "2 tunnels".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+// ssmDenied reports whether the SSM status call was denied.
+func ssmDenied(perms []*awsx.PermissionError) bool {
+	for _, p := range perms {
+		if p.Action == "ssm:DescribeInstanceInformation" {
+			return true
+		}
+	}
+	return false
+}
+
+// activeByRef groups sessions that are not stopped by resource Ref.
+func activeByRef(sessions []tunnel.Session) map[string][]tunnel.Session {
+	out := map[string][]tunnel.Session{}
+	for _, s := range sessions {
+		if s.Status == tunnel.Stopped {
+			continue
+		}
+		if ref, ok := tunnelRef(s.Spec); ok {
+			out[ref] = append(out[ref], s)
+		}
+	}
+	return out
+}
+
+// tunnelsNote summarizes a resource's tunnels for its list row, e.g.
+// "● mailpit 127.0.0.1:18025" or "● 3 tunnels"; "" without tunnels.
+func tunnelsNote(r core.Resource, sessions []tunnel.Session) string {
+	switch len(sessions) {
+	case 0:
+		return ""
+	case 1:
+		s := sessions[0]
+		what := statusText(s)
+		if r.Kind == core.KindEC2 {
+			what = portLabel(r, s.Spec.RemotePort) + " " + what
+		}
+		return statusGlyph(s.Status) + " " + what + " → " + app.ConnString(s.Spec)
+	}
+	glyph := statusGlyph(tunnel.Up)
+	for _, s := range sessions {
+		if s.Status != tunnel.Up {
+			glyph = statusGlyph(s.Status)
+		}
+	}
+	return glyph + " " + plural(len(sessions), "tunnel")
+}
+
+func portLabel(r core.Resource, remote int) string {
+	for _, p := range r.Ports {
+		if p.Remote == remote && p.Name != "" {
+			return p.Name
+		}
+	}
+	return strconv.Itoa(remote)
+}
+
+// profileTunnels counts active tunnels per profile.
+func profileTunnels(sessions []tunnel.Session) map[string]int {
+	out := map[string]int{}
+	for _, s := range sessions {
+		if tunnel.IsActive(s.Status) {
+			out[s.Spec.Profile]++
+		}
+	}
+	return out
+}
+
+// groupUp counts g's members with an active tunnel. Sessions don't carry
+// the resource name, so a member matches by profile, region (when set),
+// remote port and the label, which starts with the resource name.
+func groupUp(g core.Group, sessions []tunnel.Session) int {
+	n := 0
+	for _, gm := range g.Members {
+		for _, s := range sessions {
+			if tunnel.IsActive(s.Status) && s.Spec.Profile == gm.Profile && s.Spec.RemotePort == gm.Remote &&
+				(gm.Region == "" || s.Spec.Region == gm.Region) && strings.HasPrefix(s.Spec.Label, gm.Name+" ") {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}

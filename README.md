@@ -162,6 +162,28 @@ each profile, and the background agent. `awsport doctor --report doctor.md`
 writes the same results with account IDs, emails, keys and home paths
 redacted — send that file to whoever helps you.
 
+### Reporting a bug
+
+`awsport bug` files a GitHub issue with the diagnostics attached. It asks for
+a title and what happened (or takes `--title`), then collects the awsport,
+OS and AWS CLI/plugin versions, the `awsport doctor` warnings and failures,
+the last 40 lines of the agent log and the latest crash log from the past
+week. Because the issue is public, everything is redacted first: profile,
+resource, group, role and sso-session names become `profile-1`,
+`resource-1`, … (read from your own profiles, state and discovery, so they
+are caught wherever they appear), and account IDs, ARNs, AWS endpoints,
+instance IDs, the SSO start URL, access key IDs, emails, private IPs and your
+home directory are replaced too. The full issue is shown and nothing is sent
+until you confirm (`--dry-run` only prints it; `--yes` skips the question).
+
+With a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN` or a `gh auth login`) the
+issue is created directly and its link printed. Without one, if GitHub
+refuses the token, or with `--browser`, the prefilled issue form opens in
+your browser for you to review and submit (the link is printed too).
+
+If awsport crashes, it saves a crash log in its state directory and asks you
+to run `awsport bug`, which attaches it automatically.
+
 ## Tag conventions
 
 awsport works with untagged resources, but tags make it smarter:
@@ -212,10 +234,16 @@ shell: `awsport ps` lists running tunnels, `awsport down <name>` (or
 `--all`) stops them. The agent listens on a user-only socket in the state
 directory and logs to `agent.log` next to it.
 
-In the TUI, `enter` on a port toggles its tunnel on and off (`x` also stops).
+In the TUI, `enter` on a port — or on a database row in the resource list —
+toggles its tunnel on and off (`x` also stops). Rows show which tunnels are up.
 Web ports show their local address as a clickable link (in terminals that
 support OSC 8 hyperlinks: iTerm2, Windows Terminal, VS Code, GNOME Terminal,
 WezTerm, kitty…); `o` opens it in your browser and `c` copies the address.
+`?` shows every key for the current screen, and `!` reports a bug without
+leaving the TUI.
+
+Resource lists are cached for 15 minutes, so reopening a profile is instant;
+the list says how old it is and refreshes in the background (`r` forces it).
 
 ## Configuration
 
@@ -224,6 +252,7 @@ WezTerm, kitty…); `o` opens it in your browser and `c` copies the address.
 | `~/.config/awsport/config.yaml`         | you / `init`    | personal settings (override the team file) |
 | `~/.config/awsport/team.yaml`           | `init --from` / `init --refresh` | imported team config      |
 | `~/.local/state/awsport/state.json`     | awsport         | saved ports, bastions, manual ports, groups |
+| `~/.local/state/awsport/discovery-cache.json` | awsport   | resource lists (15 min), safe to delete    |
 
 On macOS and Windows both live under the OS config directory
 (`~/Library/Application Support/awsport`, `%AppData%\awsport`). Override with
@@ -278,6 +307,7 @@ identifier) and, if set, region — so groups survive instance replacement.
 | `awsport down [--all] [name\|group...]`         | stop background tunnels by label, key or group name                          |
 | `awsport groups`                                | list tunnel groups                                                          |
 | `awsport doctor [--profile P] [--report FILE] [--json]` | check tools, files, SSO, browser, profile permissions and the agent; prints a fix per problem |
+| `awsport bug [--title T] [--yes] [--browser] [--dry-run]` | report a bug on GitHub with redacted diagnostics (see [Reporting a bug](#reporting-a-bug)) |
 | `awsport update`                                | self-update from the latest GitHub release (checksum-verified)              |
 | `awsport version`                               | print version                                                               |
 

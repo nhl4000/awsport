@@ -107,7 +107,10 @@ func newClient(sock, version string) *Client {
 			return d.DialContext(ctx, "unix", sock)
 		},
 		DisableCompression: true,
-		IdleConnTimeout:    30 * time.Second,
+		// One connection per request: a reused idle connection could reach an
+		// agent that is shutting down after a fresh one took over the socket
+		// (observed on Windows). Local socket dials cost microseconds.
+		DisableKeepAlives: true,
 	}}
 	return c
 }
@@ -276,7 +279,7 @@ func (c *Client) mutate(spawn bool, path string, in any) (mutationResponse, erro
 			c.waitSeen(resp.Rev)
 			return resp, nil
 		}
-		if !spawn || attempt > 0 || !isStatus(err, http.StatusServiceUnavailable) {
+		if !spawn || attempt >= maxShutdownRetries || !isStatus(err, http.StatusServiceUnavailable) {
 			return resp, err
 		}
 		// The agent is exiting: wait for the stream to notice, then retry
@@ -284,6 +287,9 @@ func (c *Client) mutate(spawn bool, path string, in any) (mutationResponse, erro
 		c.waitStreamChange(gen)
 	}
 }
+
+// maxShutdownRetries bounds retries of a mutation that hit an exiting agent.
+const maxShutdownRetries = 3
 
 // connect makes sure the event stream runs, starting an agent first when
 // spawn is set. The caller holds connMu.

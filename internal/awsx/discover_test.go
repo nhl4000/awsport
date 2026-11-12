@@ -263,28 +263,31 @@ func TestDiscoverRegionPartialErrors(t *testing.T) {
 			Err: &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not allowed"}}
 	}
 	web := []ec2Instance{instance("i-web", "web", "running", nil)}
+	webAndOld := []ec2Instance{instance("i-web", "web", "running", nil), instance("i-old", "old", "stopped", nil)}
 	aurora := []dbCluster{{ID: "aurora", Status: "available", Endpoint: "aurora.cluster-example.internal", Port: 3306}}
 	tests := []struct {
 		name        string
 		clients     regionClients
 		wantIDs     []string
 		wantActions []string
+		reachable   map[string]bool // optional: resource ID -> connectable
 	}{
-		{"ssm denied hides EC2", regionClients{
-			ec2: &fakeEC2{instances: web},
+		{"ssm denied keeps running EC2 connectable", regionClients{
+			ec2: &fakeEC2{instances: webAndOld},
 			ssm: &fakeSSM{err: denied("ssm:DescribeInstanceInformation")},
 			rds: &fakeRDS{clusters: aurora},
-		}, []string{"aurora"}, []string{"ssm:DescribeInstanceInformation"}},
+		}, []string{"i-old", "i-web", "aurora"}, []string{"ssm:DescribeInstanceInformation"},
+			map[string]bool{"i-web": true, "i-old": false}},
 		{"rds instances denied keeps EC2 and clusters", regionClients{
 			ec2: &fakeEC2{instances: web},
 			ssm: &fakeSSM{infos: []ssmInstanceInfo{{InstanceID: "i-web", PingStatus: "Online"}}},
 			rds: &fakeRDS{clusters: aurora, instErr: denied("rds:DescribeDBInstances")},
-		}, []string{"i-web", "aurora"}, []string{"rds:DescribeDBInstances"}},
+		}, []string{"i-web", "aurora"}, []string{"rds:DescribeDBInstances"}, nil},
 		{"ec2 and rds denied", regionClients{
 			ec2: &fakeEC2{err: denied("ec2:DescribeInstances")},
 			ssm: &fakeSSM{},
 			rds: &fakeRDS{instErr: denied("rds:DescribeDBInstances"), clusterErr: denied("rds:DescribeDBClusters")},
-		}, nil, []string{"ec2:DescribeInstances", "rds:DescribeDBInstances", "rds:DescribeDBClusters"}},
+		}, nil, []string{"ec2:DescribeInstances", "rds:DescribeDBInstances", "rds:DescribeDBClusters"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -305,6 +308,9 @@ func TestDiscoverRegionPartialErrors(t *testing.T) {
 			var ids []string
 			for _, r := range got {
 				ids = append(ids, r.ID)
+				if want, ok := tt.reachable[r.ID]; ok && (r.Unreachable == "") != want {
+					t.Errorf("%s connectable = %v (reason %q), want %v", r.ID, r.Unreachable == "", r.Unreachable, want)
+				}
 			}
 			if !reflect.DeepEqual(ids, tt.wantIDs) {
 				t.Errorf("resources = %v, want %v", ids, tt.wantIDs)

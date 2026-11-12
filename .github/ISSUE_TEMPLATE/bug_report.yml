@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in awsport doesn't work. Tip — `awsport bug` fills this in for you with redacted diagnostics.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Running `awsport bug` in a terminal prefills this form with your
+        environment, `awsport doctor` results and recent logs, with AWS names, account IDs and
+        other identifiers redacted. This issue is public: remove anything you don't want to share.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `awsport` and select a profile
+        2. Connect to an EC2 instance on port 8080
+        3. …
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: awsport version, OS and AWS CLI / session-manager-plugin versions (`awsport version`, `aws --version`).
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: '`awsport doctor` output, agent log lines or a crash log. Redact account IDs and names first.'
+      render: text
