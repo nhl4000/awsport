@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/nhl4000/awsport/internal/agent"
@@ -19,6 +20,8 @@ import (
 	"github.com/nhl4000/awsport/internal/deps"
 	"github.com/nhl4000/awsport/internal/login"
 	"github.com/nhl4000/awsport/internal/open"
+	"github.com/nhl4000/awsport/internal/state"
+	"github.com/nhl4000/awsport/internal/winports"
 )
 
 // latestReleaseURL is the GitHub API endpoint of awsport's newest release.
@@ -64,6 +67,26 @@ func System(version, commit string) Deps {
 		},
 		Agent:    agent.Inspect,
 		AgentLog: logPath,
+		SavedPorts: func() (map[string]int, error) {
+			st, err := state.Open()
+			if err != nil {
+				return nil, err
+			}
+			return st.Get().Ports, nil
+		},
+		WindowsPorts: windowsPorts(),
+	}
+}
+
+// windowsPorts inspects Windows from WSL through the C: drive mount; nil
+// outside WSL.
+func windowsPorts() func(ctx context.Context) ([]winports.Listener, []winports.Proxy, error) {
+	if !deps.IsWSL() {
+		return nil
+	}
+	cDrive := strings.TrimRight(open.WSLMountRoot(), "/") + "/c"
+	return func(ctx context.Context) ([]winports.Listener, []winports.Proxy, error) {
+		return winports.Inspect(ctx, cDrive+"/Windows/System32", cDrive)
 	}
 }
 

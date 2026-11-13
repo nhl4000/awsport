@@ -135,6 +135,10 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
+// WSLMountRoot is where WSL mounts Windows drives (e.g. "/mnt/"), from the
+// [automount] root in /etc/wsl.conf.
+func WSLMountRoot() string { return wslMountRoot() }
+
 // wslMountRoot returns the [automount] root from /etc/wsl.conf (default "/mnt/").
 func wslMountRoot() string {
 	b, err := os.ReadFile("/etc/wsl.conf")

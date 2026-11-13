@@ -12,6 +12,7 @@ import (
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/deps"
 	"github.com/nhl4000/awsport/internal/tunnel"
+	"github.com/nhl4000/awsport/internal/winports"
 )
 
 const (
@@ -61,6 +62,11 @@ type Deps struct {
 	// Agent queries the background agent; info is nil when none runs.
 	Agent    func() (*agent.Info, []tunnel.Session, error)
 	AgentLog string
+
+	// SavedPorts are awsport's remembered local ports, keyed by state.PortKey.
+	SavedPorts func() (map[string]int, error)
+	// WindowsPorts lists Windows listeners and portproxy rules; nil outside WSL.
+	WindowsPorts func(ctx context.Context) ([]winports.Listener, []winports.Proxy, error)
 }
 
 // Options select what Run checks.
@@ -80,6 +86,7 @@ func Run(ctx context.Context, d Deps, opts Options) Result {
 		latest                                  string
 		tools                                   []deps.Check
 		files, sso, browser, agentRes, profSumm []Check
+		winPorts                                []Check
 		profSecs                                []Section
 	)
 	run := func(f func()) {
@@ -118,6 +125,14 @@ func Run(ctx context.Context, d Deps, opts Options) Result {
 		agentRes = agentChecks(info, sessions, err, d.Version, d.AgentLog, now)
 	})
 	run(func() { profSumm, profSecs = profileChecks(ctx, d, cfg, opts) })
+	if d.WSL && d.WindowsPorts != nil {
+		run(func() {
+			saved, _ := d.SavedPorts()
+			_, sessions, _ := d.Agent()
+			listeners, proxies, err := d.WindowsPorts(ctx)
+			winPorts = windowsPortChecks(awsportPorts(saved, sessions), listeners, proxies, err)
+		})
+	}
 	wg.Wait()
 
 	res := Result{
@@ -141,6 +156,11 @@ func Run(ctx context.Context, d Deps, opts Options) Result {
 		Section{Name: "Files", Checks: files},
 		Section{Name: "SSO", Checks: sso},
 		Section{Name: "Browser", Checks: browser},
+	)
+	if winPorts != nil {
+		res.Sections = append(res.Sections, Section{Name: "Windows ports (WSL)", Checks: winPorts})
+	}
+	res.Sections = append(res.Sections,
 		Section{Name: "Profiles", Checks: profSumm},
 	)
 	res.Sections = append(res.Sections, profSecs...)

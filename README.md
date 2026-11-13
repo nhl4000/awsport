@@ -158,7 +158,11 @@ Profiles
 It covers the AWS CLI and plugin versions, `~/.aws` permissions (including
 WSL setups where it lives on a Windows drive), SSO configuration and token
 expiry, whether a browser can be opened, credentials and IAM permissions for
-each profile, and the background agent. `awsport doctor --report doctor.md`
+each profile, and the background agent. On WSL it also checks the Windows
+side: a Windows program or `netsh interface portproxy` rule on one of
+awsport's local ports would be reached by your Windows browser instead of the
+tunnel (two tunnels then seem to show the same service); doctor names it and
+prints the command that removes it. `awsport doctor --report doctor.md`
 writes the same results with account IDs, emails, keys and home paths
 redacted — send that file to whoever helps you.
 
