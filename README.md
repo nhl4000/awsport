@@ -245,6 +245,10 @@ toggles its tunnel on and off (`x` also stops). Rows show which tunnels are up.
 Web ports show their local address as a clickable link (in terminals that
 support OSC 8 hyperlinks: iTerm2, Windows Terminal, VS Code, GNOME Terminal,
 WezTerm, kitty…); `o` opens it in your browser and `c` copies the address.
+When you start a web tunnel (TUI, `awsport up`, or a group), awsport opens it
+in your browser as soon as it is up. Database tunnels never open, nor do
+reconnects; turn it off with `open_browser: false` in the config or
+`awsport up --no-open`.
 `?` shows every key for the current screen, and `!` reports a bug without
 leaving the TUI.
 
@@ -284,6 +288,7 @@ port_documents:
 shell_command: sudo su - ubuntu
 reconnect: true
 max_failures: 5
+open_browser: true   # open web tunnels in the browser once they are up
 groups:
   - name: example-dev-stack
     members:
@@ -351,7 +356,7 @@ passed. The TUI shows `via <document>` on such ports and tunnels.
 | `awsport login`                                 | SSO login, then sync profiles into `~/.aws/config`                          |
 | `awsport login <profile>`                       | `aws sso login --profile <profile>`                                         |
 | `awsport ls [profile] [--all] [--json]`         | list EC2/RDS resources (all profiles when none given)                       |
-| `awsport up <group \| profile/name[:port]>... [-d]` | start tunnels; prints `127.0.0.1:<port>`; Ctrl-C stops the ones it started, `-d` leaves them running in the background |
+| `awsport up <group \| profile/name[:port]>... [-d] [--no-open]` | start tunnels; prints `127.0.0.1:<port>` and opens web tunnels in the browser once up; Ctrl-C stops the ones it started, `-d` leaves them running in the background |
 | `awsport ps [--json]`                           | list tunnels running in the background agent                                |
 | `awsport down [--all] [name\|group...]`         | stop background tunnels by label, key or group name                          |
 | `awsport groups`                                | list tunnel groups                                                          |

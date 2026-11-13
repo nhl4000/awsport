@@ -504,6 +504,7 @@ func (m *model) onConnect(msg connectMsg) tea.Cmd {
 		m.setErr(fmt.Errorf("connect %s:%d: %w", msg.r.Name, msg.remote, msg.err))
 	default:
 		m.setFlash(fmt.Sprintf("started %s → %s", msg.spec.Label, localAddr(msg.spec)))
+		m.queueAutoOpen(msg.spec)
 	}
 	return tea.Batch(m.rebuildPorts(), m.rebuildDashboard())
 }

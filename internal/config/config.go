@@ -53,6 +53,7 @@ type Config struct {
 	Groups        []core.Group        `yaml:"groups,omitempty"`
 	ShellCommand  string              `yaml:"shell_command,omitempty"`
 	Reconnect     *bool               `yaml:"reconnect,omitempty"`    // default true
+	OpenBrowser   *bool               `yaml:"open_browser,omitempty"` // open web tunnels in the browser once up; default true
 	MaxFailures   int                 `yaml:"max_failures,omitempty"` // default 5
 	TeamSource    string              `yaml:"team_source,omitempty"`  // URL/path last imported (for re-import)
 }
@@ -191,6 +192,12 @@ func (c *Config) ReconnectEnabled() bool {
 	return c.Reconnect == nil || *c.Reconnect
 }
 
+// OpenBrowserEnabled reports whether a freshly started EC2 web tunnel opens
+// in the browser once it is up (default true).
+func (c *Config) OpenBrowserEnabled() bool {
+	return c.OpenBrowser == nil || *c.OpenBrowser
+}
+
 // EffectiveShell returns ShellCommand or core.DefaultShellCommand.
 func (c *Config) EffectiveShell() string {
 	if c.ShellCommand != "" {
@@ -234,6 +241,10 @@ func merge(base, over *Config) *Config {
 	if over.Reconnect != nil {
 		v := *over.Reconnect
 		out.Reconnect = &v
+	}
+	if over.OpenBrowser != nil {
+		v := *over.OpenBrowser
+		out.OpenBrowser = &v
 	}
 	if over.MaxFailures != 0 {
 		out.MaxFailures = over.MaxFailures

@@ -18,6 +18,7 @@ import (
 
 	"github.com/nhl4000/awsport/internal/app"
 	"github.com/nhl4000/awsport/internal/core"
+	"github.com/nhl4000/awsport/internal/open"
 	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
@@ -92,7 +93,7 @@ func portList(ps []core.PortSpec) string {
 }
 
 func newUpCmd() *cobra.Command {
-	var detach bool
+	var detach, noOpen bool
 	cmd := &cobra.Command{
 		Use:   "up <group | profile/name[:port]>...",
 		Short: "Start tunnels (in the foreground; -d leaves them in the background)",
@@ -121,14 +122,16 @@ func newUpCmd() *cobra.Command {
 				return err
 			}
 			defer a.Close()
-			return runUp(ctx, a, targets, detach, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			openWeb := a.Cfg.OpenBrowserEnabled() && !noOpen
+			return runUp(ctx, a, targets, detach, openWeb, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "leave the tunnels running in the background and exit")
+	cmd.Flags().BoolVar(&noOpen, "no-open", false, "don't open web tunnels in the browser once they are up")
 	return cmd
 }
 
-func runUp(ctx context.Context, a *app.App, targets []upTarget, detach bool, out, errOut io.Writer) error {
+func runUp(ctx context.Context, a *app.App, targets []upTarget, detach, openWeb bool, out, errOut io.Writer) error {
 	before := activeKeys(a.Tunnels.Sessions())
 	var specs []core.TunnelSpec
 	failed := 0
@@ -157,7 +160,9 @@ func runUp(ctx context.Context, a *app.App, targets []upTarget, detach bool, out
 	if err := writeSpecs(out, specs); err != nil {
 		return err
 	}
+	opener := expectWeb(a, openWeb, own, specs, out)
 	if detach {
+		waitAndOpen(ctx, a, opener, out)
 		fmt.Fprintln(out, "Tunnels keep running in the background: `awsport ps` lists them, `awsport down` stops them.")
 		return nil
 	}
@@ -190,12 +195,78 @@ func runUp(ctx context.Context, a *app.App, targets []upTarget, detach bool, out
 			}
 			last[ev.Key] = ev.Session.Status
 			printEvent(out, ev.Session)
+			reportOpen(out, ev.Session.Spec.Label, opener, ev.Key, ev.Session.Status)
 			if !anyActive(a.Tunnels.Get, own) {
 				// Remove the failed sessions from the agent as well.
 				_ = stopKeys(a.Tunnels, own)
 				return errors.New("all tunnels have stopped")
 			}
 		}
+	}
+}
+
+// detachOpenWait bounds how long `up -d` waits for web tunnels to come up
+// before opening them.
+const detachOpenWait = 20 * time.Second
+
+// expectWeb registers the freshly started EC2 web tunnels (own keys only) to
+// be opened in the browser once up, opening any that already are.
+func expectWeb(a *app.App, enabled bool, own []string, specs []core.TunnelSpec, out io.Writer) *open.AutoOpener {
+	opener := open.NewAutoOpener(open.Browser)
+	if !enabled {
+		return opener
+	}
+	byKey := map[string]core.TunnelSpec{}
+	for _, s := range specs {
+		byKey[s.Key] = s
+	}
+	for _, k := range own {
+		spec := byKey[k]
+		if !opener.Expect(spec) {
+			continue
+		}
+		if s, ok := a.Tunnels.Get(k); ok {
+			reportOpen(out, spec.Label, opener, k, s.Status)
+		}
+	}
+	return opener
+}
+
+// waitAndOpen waits (bounded) for expected web tunnels to come up and opens
+// them; used by `up -d`, which otherwise exits immediately.
+func waitAndOpen(ctx context.Context, a *app.App, opener *open.AutoOpener, out io.Writer) {
+	if opener.Pending() == 0 {
+		return
+	}
+	timeout := time.NewTimer(detachOpenWait)
+	defer timeout.Stop()
+	events := a.Tunnels.Events()
+	for opener.Pending() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			fmt.Fprintln(out, "Some web tunnels weren't up yet; open them later with `awsport` (o) or the links above.")
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			reportOpen(out, ev.Session.Spec.Label, opener, ev.Key, ev.Session.Status)
+		}
+	}
+}
+
+// reportOpen feeds a status to opener and prints what happened when it
+// tried to open a browser.
+func reportOpen(out io.Writer, label string, opener *open.AutoOpener, key string, st tunnel.Status) {
+	u, did, err := opener.Update(key, st == tunnel.Up, tunnel.IsActive(st))
+	switch {
+	case !did:
+	case err != nil:
+		fmt.Fprintf(out, "%s is up; couldn't open a browser (%v). Open %s yourself.\n", label, err, u)
+	default:
+		fmt.Fprintf(out, "Opened %s in your browser (%s).\n", u, label)
 	}
 }
 

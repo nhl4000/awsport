@@ -126,6 +126,28 @@ func (m *model) openURL(spec core.TunnelSpec) {
 	m.setFlash("opened " + u)
 }
 
+// queueAutoOpen marks a tunnel the user just started so its web URL opens in
+// the browser once it is up (EC2 web ports only; open_browser: false turns
+// it off). If it is already up, the URL opens now.
+func (m *model) queueAutoOpen(spec core.TunnelSpec) {
+	if !m.a.Cfg.OpenBrowserEnabled() || !m.autoOpen.Expect(spec) {
+		return
+	}
+	if s, ok := m.a.Tunnels.Get(spec.Key); ok {
+		if u, did, err := m.autoOpen.Update(spec.Key, s.Status == tunnel.Up, tunnel.IsActive(s.Status)); did {
+			m.reportAutoOpen(spec, u, err)
+		}
+	}
+}
+
+func (m *model) reportAutoOpen(spec core.TunnelSpec, u string, err error) {
+	if err != nil {
+		m.setWarn(fmt.Sprintf("%s is up on %s; couldn't open a browser (%v)", spec.Label, linkAddr(spec), err))
+		return
+	}
+	m.setFlash(fmt.Sprintf("%s is up: opened %s in your browser", spec.Label, u))
+}
+
 func (m *model) copyConn(spec core.TunnelSpec) {
 	conn := app.ConnString(spec)
 	if clipboard.Unsupported {
@@ -286,6 +308,9 @@ func (m *model) onGroupStarted(msg groupStartedMsg) tea.Cmd {
 		m.setWarn(fmt.Sprintf("%s, %d not allowed:\n%s", text, len(msg.errs), permissionNotice(awsx.PermissionErrors(joined))))
 	default:
 		m.setStatus(fmt.Sprintf("%s, %d failed: %s", text, len(msg.errs), errorsSummary(msg.errs)), flashError)
+	}
+	for _, spec := range msg.specs {
+		m.queueAutoOpen(spec)
 	}
 	m.goTo(scrDashboard)
 	return m.rebuildDashboard()

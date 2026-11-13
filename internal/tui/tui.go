@@ -24,6 +24,7 @@ import (
 	"github.com/nhl4000/awsport/internal/core"
 	"github.com/nhl4000/awsport/internal/deps"
 	"github.com/nhl4000/awsport/internal/login"
+	"github.com/nhl4000/awsport/internal/open"
 	"github.com/nhl4000/awsport/internal/tunnel"
 )
 
@@ -219,6 +220,7 @@ type model struct {
 	pending  pendingConnect
 	bastion  *awsx.NeedBastionError
 	selected map[string]bool
+	autoOpen *open.AutoOpener // freshly started web tunnels to open once up
 
 	onb   onboarding
 	lists map[screen]*list.Model
@@ -246,6 +248,7 @@ func newModel(a *app.App) *model {
 		loading:      map[string]bool{},
 		known:        map[string]core.Resource{},
 		selected:     map[string]bool{},
+		autoOpen:     open.NewAutoOpener(open.Browser),
 		lists:        map[screen]*list.Model{},
 	}
 	for _, s := range []screen{scrProfiles, scrResources, scrPorts, scrBastion, scrDashboard, scrGroups} {
@@ -740,7 +743,12 @@ func (m *model) prompt(label, placeholder string, submit func(string) (tea.Cmd, 
 
 func (m *model) onEvent(ev tunnel.Event) tea.Cmd {
 	label := ev.Session.Spec.Label
-	switch ev.Session.Status {
+	st := ev.Session.Status
+	if u, did, err := m.autoOpen.Update(ev.Key, st == tunnel.Up, tunnel.IsActive(st)); did {
+		m.reportAutoOpen(ev.Session.Spec, u, err)
+		return m.rebuildTunnelViews()
+	}
+	switch st {
 	case tunnel.AuthExpired:
 		m.setStatus(fmt.Sprintf("%s: credentials expired, press L to log in again", label), flashError)
 	case tunnel.Failed:
